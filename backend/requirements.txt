@@ -1,0 +1,5 @@
+# Offline demo (zero keys) needs only:
+pydantic>=2
+
+# Live mode at kickoff (uncomment when you wire Featherless / AI/ML API / Band):
+# httpx>=0.27
