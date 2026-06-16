@@ -40,10 +40,54 @@ from backend.orchestrator import run_incident
 from jobs import resume as resume_parser
 from jobs.orchestrator import run_job_search
 from jobs.providers import ProviderError, ProviderNotConfigured, make_provider
+from channels import registry as channels
 
 # In-memory sessions: run_id -> prepared inputs + the HITL gate (resolve + jobs).
 _SESSIONS: dict[str, dict] = {}
 _JOB_SESSIONS: dict[str, dict] = {}
+
+
+def _resolve_gate(kind: str, run_id: str, approve: bool) -> bool:
+    """Resolve a pending commander gate from ANY source (browser or channel)."""
+    if kind == "incident":
+        sess = _SESSIONS.get(run_id)
+        if sess and sess.get("event") and not sess["event"].is_set():
+            sess["approved"] = approve
+            sess["event"].set()
+            return True
+    elif kind == "job":
+        sess = _JOB_SESSIONS.get(run_id)
+        if sess and sess.get("event") and not sess["event"].is_set():
+            sess["choice"] = {"proceed": approve, "match_id": None, "tailor": True}
+            sess["event"].set()
+            return True
+    return False
+
+
+async def _channel_command(cmd: dict) -> bool:
+    """Inbound channel command (Telegram button, etc.) -> resolve the gate."""
+    return _resolve_gate(cmd.get("kind", ""), cmd.get("run_id", ""), cmd.get("action") == "approve")
+
+
+def _incident_approval_text(transcript: list[dict]) -> tuple[str, str]:
+    """Assemble request → reasoning → response for the channel thread."""
+    svc = diag = action = val = None
+    for m in transcript:
+        p = m.get("payload") or {}
+        if m.get("intent") == "signal":
+            svc = f"{p.get('service')}/{p.get('region')}"
+        elif m.get("intent") == "hypothesis":
+            diag = p.get("root_cause")
+        elif m.get("intent") == "remediation_proposal":
+            action = p.get("action")
+        elif m.get("intent") == "validation_result" and p.get("passed"):
+            val = f"p99 {round(p.get('projected_p99_ms', 0))}ms, err {p.get('projected_error_rate', 0) * 100:.2f}%"
+    title = f"⚠ Aegis — approval needed for {svc or 'incident'}"
+    body = (f"Diagnosis: {diag or 'n/a'}\n"
+            f"Proposed fix: {action or 'n/a'} (irreversible)\n"
+            f"Validator: PASSED ({val or 'within SLO'})\nApprove to execute.")
+    return title, body
+
 
 STATIC = Path(__file__).parent / "static"
 
@@ -54,6 +98,7 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 @app.on_event("startup")
 async def _startup() -> None:
     store.init_db()
+    await channels.start_all(_channel_command)  # registers handler + starts listeners
 
 
 def _sse(event: str, data: object) -> str:
@@ -182,6 +227,11 @@ async def resolve_stream(request: Request) -> StreamingResponse:
         ev = asyncio.Event()
         sess["event"] = ev
         await queue.put(("await_approval", {"run_id": run_id}))
+        # Fan the approval request out to any enabled channels (Telegram resolves
+        # the gate natively; others carry a deep link). Non-blocking.
+        title, body = _incident_approval_text(transcript)
+        asyncio.create_task(channels.broadcast_approval(
+            kind="incident", run_id=run_id, title=title, body=body))
         await ev.wait()
         return bool(sess.get("approved"))
 
@@ -283,6 +333,76 @@ async def stream(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Phase 6 — Channels: multi-platform interface layer
+# --------------------------------------------------------------------------- #
+@app.get("/api/channels")
+async def api_channels() -> JSONResponse:
+    return JSONResponse({"channels": channels.all_status()})
+
+
+@app.post("/api/channels/{name}/test")
+async def api_channel_test(name: str) -> JSONResponse:
+    ch = channels.get(name)
+    if not ch:
+        return JSONResponse({"error": f"unknown channel '{name}'"}, status_code=404)
+    return JSONResponse({"channel": name, **(await ch.send_test())})
+
+
+@app.post("/api/channels/draft")
+async def api_channel_draft(request: Request) -> JSONResponse:
+    """Generate an approve-then-share post draft for a job match (no posting)."""
+    body = await request.json()
+    title = body.get("title", "a new role")
+    company = body.get("company", "a company")
+    skills = ", ".join((body.get("skills") or [])[:5]) or "my background"
+    from backend.llm import make_llm
+    fallback = (f"Excited to be exploring {title} opportunities at {company}! "
+                f"Bringing experience in {skills}. Open to connecting. #opentowork #hiring")
+    draft = ""
+    if os.getenv("LLM_MODE", "offline").lower() != "offline":  # offline echoes the prompt
+        draft = make_llm("aiml").complete(
+            system="Write a concise, professional LinkedIn/X post (<280 chars). 1-2 sentences + 2 hashtags.",
+            user=f"Role: {title} at {company}. Skills: {skills}.", role="@applier", tag="post",
+        )
+    text = draft.strip() if draft and len(draft.strip()) > 40 else fallback
+    return JSONResponse({"draft": text[:280],
+                         "post_targets": [c.name for c in channels.with_capability("post")]})
+
+
+@app.post("/api/channels/{name}/post")
+async def api_channel_post(name: str, request: Request) -> JSONResponse:
+    """Publish an already-approved draft. Requires the post capability + a token."""
+    ch = channels.get(name)
+    if not ch:
+        return JSONResponse({"error": f"unknown channel '{name}'"}, status_code=404)
+    if not ch.capabilities.get("post"):
+        return JSONResponse({"error": f"{name} cannot post in this runtime: {ch.status()['detail']}"},
+                            status_code=400)
+    text = (await request.json()).get("text", "").strip()
+    if not text:
+        return JSONResponse({"error": "empty post text"}, status_code=400)
+    return JSONResponse({"channel": name, **(await ch.send(text))})
+
+
+@app.post("/api/channels/whatsapp/inbound")
+async def api_whatsapp_inbound(request: Request) -> JSONResponse:
+    """Twilio webhook for WhatsApp replies (needs a public URL). 'approve'/'reject'
+    resolves the single pending incident gate. Honest: only works once deployed."""
+    import urllib.parse
+    raw = (await request.body()).decode("utf-8", "replace")
+    form = {k: v[0] for k, v in urllib.parse.parse_qs(raw).items()}
+    bodytext = (form.get("Body") or "").strip().lower()
+    if bodytext not in ("approve", "reject", "yes", "no"):
+        return JSONResponse({"ok": False, "detail": "reply 'approve' or 'reject'"})
+    approve = bodytext in ("approve", "yes")
+    pending = [rid for rid, s in _SESSIONS.items() if s.get("event") and not s["event"].is_set()]
+    if not pending:
+        return JSONResponse({"ok": False, "detail": "no pending approval"})
+    _resolve_gate("incident", pending[-1], approve)
+    return JSONResponse({"ok": True, "detail": f"{'approved' if approve else 'rejected'}"})
 
 
 # --------------------------------------------------------------------------- #
@@ -485,6 +605,13 @@ async def jobs_stream(request: Request) -> StreamingResponse:
                 applications=result["applications"], transcript=transcript,
                 verdict=result.get("decision"), tailored_count=result["tailored_count"],
             )
+            # Push a job alert to notify-capable channels (Telegram/Discord).
+            top = (result["matches"] or [{}])[0]
+            if top:
+                asyncio.create_task(channels.notify(
+                    f"✦ Aegis jobs — {len(result['matches'])} matches for '{sess['query']}'. "
+                    f"Top: {top.get('title')} @ {top.get('company')} "
+                    f"({round((top.get('fit_score') or 0) * 100)}% fit). {top.get('url', '')}"))
             await queue.put(("result", {**result, "run_db_id": run_db_id}))
         except ProviderError as e:
             await queue.put(("error", {"detail": f"Job provider error: {e}"}))
