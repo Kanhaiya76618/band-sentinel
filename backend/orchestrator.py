@@ -35,9 +35,26 @@ MODELED_SECONDS = {
 }
 
 
-async def run_incident(bus: AgentBus | None = None) -> tuple[list[RoomMessage], dict]:
+async def run_incident(
+    bus: AgentBus | None = None,
+    *,
+    telemetry: list[dict] | None = None,
+    scenario: Scenario | None = None,
+    approve=None,
+) -> tuple[list[RoomMessage], dict]:
+    """
+    Drive one incident.
+
+    Backward compatible: called with no args it runs the offline demo exactly as
+    before. Phase 2 adds two injection points so the SAME pipeline runs on REAL
+    data behind a human gate:
+        telemetry  — a parsed metric timeline the observer detects on (vs generated)
+        scenario   — service/region/cost context for the chaos model + cost math
+        approve    — async () -> bool, the human-in-the-loop gate for the
+                     irreversible action. None => auto-approve (offline demo).
+    """
     bus = bus or make_bus()
-    s = Scenario()
+    s = scenario or Scenario()
 
     observer = Observer("@observer", make_llm("aiml"))
     diagnostician = Diagnostician("@diagnostician", make_llm("featherless"))
@@ -51,8 +68,8 @@ async def run_incident(bus: AgentBus | None = None) -> tuple[list[RoomMessage], 
     def log(m: RoomMessage) -> None:
         timeline.append(f"{m.sender}: {m.text}")
 
-    # 1) Observer opens the incident
-    sig_msg, real = await _post(bus, observer.open_incident(s), log)
+    # 1) Observer opens the incident (on uploaded telemetry when provided)
+    sig_msg, real = await _post(bus, observer.open_incident(s, telemetry), log)
     if not real:
         return await bus.history(), {}
     sig = Signal(**sig_msg.payload)
@@ -81,7 +98,15 @@ async def run_incident(bus: AgentBus | None = None) -> tuple[list[RoomMessage], 
     # 4) Human-approval gate for the irreversible action
     if not approved_rem.reversible:
         await _post(bus, commander.request_approval(approved_rem), log)
-        approver = "human:oncall"      # auto-approved in the offline demo
+        if approve is not None:
+            # Real HITL gate: block until the UI sends Approve/Reject.
+            granted = await approve()
+            if not granted:
+                return await bus.history(), {
+                    "resolved": False, "rejected_by": "human:oncall",
+                    "rejected_action": approved_rem.action,
+                }
+        approver = "human:oncall"      # auto-approved only in the offline demo
     else:
         approver = "auto:policy"
 

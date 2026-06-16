@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 # Enumerations
 # --------------------------------------------------------------------------- #
 class Intent(str, Enum):
+    # ── Incident-resolution workflow ──────────────────────────────────────
     SIGNAL = "signal"                       # observer declares an incident
     HYPOTHESIS = "hypothesis"               # diagnostician's root-cause guess
     REMEDIATION = "remediation_proposal"    # remediator proposes a fix
@@ -30,6 +31,12 @@ class Intent(str, Enum):
     APPROVAL_REQUEST = "approval_request"   # commander asks a human
     DECISION = "decision"                   # commander executes / resolves
     POSTMORTEM = "postmortem"               # auto-written incident report
+
+    # ── Job-application workflow (Phase 3) — same room, second domain ─────
+    SEARCH_PROFILE = "search_profile"       # observer parses criteria/resume
+    JOB_MATCHES = "job_matches"             # validator's ranked real postings
+    TAILOR_RESULT = "tailor_result"         # tailor's rewritten resume
+    APPLICATION = "application"             # applier's submitted/queued package
 
 
 class Severity(str, Enum):
