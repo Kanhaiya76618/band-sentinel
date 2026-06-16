@@ -137,6 +137,29 @@ button each. **Settings:** key status (values never echoed), incident-report
 recipients, and a default job field. Persistence is stdlib `sqlite3` at
 `data/aegis.db`.
 
+### Channels — multi-platform interface (`channels/`)
+Deliver incidents/jobs to, and act on them from, external platforms. Every
+channel declares its **real** capabilities (`notify · approve · converse · post ·
+job_search · job_apply`) so the UI/agents only offer what actually works — and we
+never report an action that didn't happen.
+
+- **Telegram** — full loop: send + inline **Approve/Reject** buttons; a
+  `getUpdates` long-poll (no public URL needed) feeds the press straight into the
+  commander's HITL gate.
+- **Discord** — notify + post (webhook or bot); interactive buttons need a
+  gateway, so approval degrades honestly to a deep link.
+- **WhatsApp** (Twilio) — notify; reply-approval via a public webhook
+  (`/api/channels/whatsapp/inbound`).
+- **X (Twitter)** — post via OAuth 1.0a (stdlib-signed); read/search best-effort.
+- **LinkedIn** — share/draft **only**; job search & auto-apply are intentionally
+  unsupported (LinkedIn's API forbids them) — we hand you the package + apply URL.
+
+Incident approvals fan out to enabled channels and resolve from whichever
+responds first (browser **or** channel). Job runs push an alert + an
+approve-then-share post draft. Each channel shows status + a **Send test** button
+on the Integrations page. Any channel without a token stays disabled with a clear
+message — never faked. Keys: see the "Channels" block in `.env.example`.
+
 ### New platform files
 ```
 backend/store.py       SQLite persistence (incidents, jobs, settings) + aggregates
@@ -149,7 +172,10 @@ jobs/providers.py      JobSearchProvider interface + Adzuna implementation
 jobs/resume.py         PDF/DOCX resume → structured profile
 jobs/agents.py         observer · validator · commander · tailor · applier
 jobs/orchestrator.py   drives the job workflow over the bus
-frontend/server.py     platform API (dashboard, resolve, jobs, history, etc.)
+channels/base.py       Channel abstraction (send / on_command / capabilities)
+channels/registry.py   loads channels from .env, status + fan-out helpers
+channels/{telegram,discord,whatsapp,twitter,linkedin}.py   the 5 channels
+frontend/server.py     platform API (dashboard, resolve, jobs, history, channels, …)
 frontend/static/       offline-first React+htm SPA (vendored, no CDN)
 ```
 
