@@ -593,14 +593,49 @@ function JobResult({ r }) {
   const apps = r.applications || [];
   const submitted = apps.filter((a) => a.status === "submitted").length;
   const queued = apps.filter((a) => a.status === "queued").length;
-  return html`<div class="verdict">
-    <div class="vhead">RUN COMPLETE — ${r.matches.length} matches · ${r.tailored_count} tailored · ${submitted} submitted · ${queued} queued</div>
-    <div class="grid">
-      <div class="cell"><div class="k">Provider</div><div class="v">${r.provider}</div></div>
-      <div class="cell"><div class="k">Matches found</div><div class="v">${r.matches.length}</div></div>
-      <div class="cell"><div class="k">Submitted</div><div class="v">${submitted}</div></div>
-      <div class="cell"><div class="k">Queued</div><div class="v">${queued}</div></div>
+  const [draft, setDraft] = useState(null);
+  const [targets, setTargets] = useState([]);
+  const [posted, setPosted] = useState(null);
+  const top = (r.matches || [])[0];
+
+  async function makeDraft() {
+    const res = await fetch("/api/channels/draft", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: top && top.title, company: top && top.company, skills: (r.profile || {}).skills }),
+    });
+    const d = await res.json();
+    setDraft(d.draft); setTargets(d.post_targets || []); setPosted(null);
+  }
+  async function post(name) {
+    const res = await fetch(`/api/channels/${name}/post`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text: draft }),
+    });
+    const d = await res.json();
+    setPosted({ name, ...d });
+  }
+
+  return html`<div>
+    <div class="verdict">
+      <div class="vhead">RUN COMPLETE — ${r.matches.length} matches · ${r.tailored_count} tailored · ${submitted} submitted · ${queued} queued</div>
+      <div class="grid">
+        <div class="cell"><div class="k">Provider</div><div class="v">${r.provider}</div></div>
+        <div class="cell"><div class="k">Matches found</div><div class="v">${r.matches.length}</div></div>
+        <div class="cell"><div class="k">Submitted</div><div class="v">${submitted}</div></div>
+        <div class="cell"><div class="k">Queued</div><div class="v">${queued}</div></div>
+      </div>
     </div>
+    ${top ? html`<div class="block" style=${{ marginTop: "14px" }}>
+      <h3>Share as a post (approve, then publish)</h3>
+      ${!draft ? html`<button class="ghost" onClick=${makeDraft}>Draft a post about ${top.title}</button>`
+        : html`<div>
+          <textarea rows="3" value=${draft} onInput=${(e) => setDraft(e.target.value)}></textarea>
+          <div class="abtns" style=${{ marginTop: "10px" }}>
+            ${targets.length ? targets.map((n) => html`<button key=${n} class="run" onClick=${() => post(n)}>Post to ${n}</button>`)
+              : html`<span class="muted">No post-capable channel connected — connect X or LinkedIn in Integrations.</span>`}
+          </div>
+          ${posted ? html`<div class=${"emailbar " + (posted.ok ? "pass" : "warn")}>${posted.ok ? "✓" : "✕"} ${posted.name}: ${posted.detail}</div>` : null}
+        </div>`}
+    </div>` : null}
   </div>`;
 }
 
@@ -706,16 +741,18 @@ function JobReport({ run }) {
 
 function Integrations() {
   const [services, setServices] = useState(null);
+  const [chans, setChans] = useState(null);
   const [tests, setTests] = useState({}); // key -> {loading|ok|detail}
 
   useEffect(() => {
     fetch("/api/dashboard").then((r) => r.json()).then((d) => setServices(d.services)).catch(() => {});
+    fetch("/api/channels").then((r) => r.json()).then((d) => setChans(d.channels)).catch(() => {});
   }, []);
 
-  async function test(key) {
+  async function test(key, url) {
     setTests((t) => ({ ...t, [key]: { loading: true } }));
     try {
-      const r = await fetch(`/api/integrations/test/${key}`, { method: "POST" });
+      const r = await fetch(url, { method: "POST" });
       const res = await r.json();
       setTests((t) => ({ ...t, [key]: res }));
     } catch (e) {
@@ -723,22 +760,46 @@ function Integrations() {
     }
   }
 
-  return html`<div class="block">
-    <h3>Connected services — config + live test</h3>
-    ${!services ? html`<div class="empty">Loading…</div>` : html`<div class="services">
-      ${services.map((s) => {
-        const t = tests[s.key];
-        return html`<div key=${s.key} class="svc intg">
-          <span class=${"dot " + (s.ok ? "ok" : "bad")}></span>
-          <span class="label">${s.label}</span>
-          <span class="detail">${s.detail}</span>
-          <button class="ghost tbtn" disabled=${t && t.loading} onClick=${() => test(s.key)}>
-            ${t && t.loading ? "Testing…" : "Test"}
-          </button>
-          ${t && !t.loading ? html`<span class=${"tres " + (t.ok ? "good" : "bad")}>${t.ok ? "✓" : "✕"} ${t.detail}</span>` : null}
-        </div>`;
-      })}
-    </div>`}
+  const CAPS = ["notify", "approve", "converse", "post", "job_search", "job_apply"];
+
+  return html`<div>
+    <div class="block">
+      <h3>Connected services — config + live test</h3>
+      ${!services ? html`<div class="empty">Loading…</div>` : html`<div class="services">
+        ${services.map((s) => {
+          const t = tests["svc:" + s.key];
+          return html`<div key=${s.key} class="svc intg">
+            <span class=${"dot " + (s.ok ? "ok" : "bad")}></span>
+            <span class="label">${s.label}</span>
+            <span class="detail">${s.detail}</span>
+            <button class="ghost tbtn" disabled=${t && t.loading} onClick=${() => test("svc:" + s.key, `/api/integrations/test/${s.key}`)}>
+              ${t && t.loading ? "Testing…" : "Test"}</button>
+            ${t && !t.loading ? html`<span class=${"tres " + (t.ok ? "good" : "bad")}>${t.ok ? "✓" : "✕"} ${t.detail}</span>` : null}
+          </div>`;
+        })}
+      </div>`}
+    </div>
+
+    <div class="block">
+      <h3>Channels — multi-platform delivery</h3>
+      ${!chans ? html`<div class="empty">Loading…</div>` : html`<div class="services">
+        ${chans.map((c) => {
+          const t = tests["ch:" + c.name];
+          return html`<div key=${c.name} class="svc intg">
+            <span class=${"dot " + (c.enabled ? "ok" : "bad")}></span>
+            <span class="label">${c.label}</span>
+            <span class="detail">${c.detail}</span>
+            <button class="ghost tbtn" disabled=${!c.enabled || (t && t.loading)} onClick=${() => test("ch:" + c.name, `/api/channels/${c.name}/test`)}>
+              ${t && t.loading ? "Sending…" : "Send test"}</button>
+            <span class="caps">
+              ${CAPS.filter((k) => c.capabilities[k]).map((k) => html`<span key=${k} class="cap on">${k}</span>`)}
+              ${CAPS.filter((k) => !c.capabilities[k]).map((k) => html`<span key=${k} class="cap">${k}</span>`)}
+            </span>
+            ${t && !t.loading ? html`<span class=${"tres " + (t.ok ? "good" : "bad")}>${t.ok ? "✓" : "✕"} ${t.detail}</span>` : null}
+          </div>`;
+        })}
+      </div>`}
+    </div>
   </div>`;
 }
 
