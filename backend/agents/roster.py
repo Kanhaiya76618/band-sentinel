@@ -46,8 +46,10 @@ class Agent:
 class Observer(Agent):
     framework, provider = "LangGraph", "aiml"
 
-    def open_incident(self, s: Scenario) -> tuple[RoomMessage, bool]:
-        timeline = generate_telemetry(s)
+    def open_incident(self, s: Scenario, telemetry: list[dict] | None = None) -> tuple[RoomMessage, bool]:
+        # Phase 2: detect on REAL uploaded telemetry when provided; otherwise
+        # fall back to the deterministic generated timeline (offline demo).
+        timeline = telemetry if telemetry is not None else generate_telemetry(s)
         breach = detect(timeline)
         if not breach:
             return RoomMessage.of(self.id, Intent.SIGNAL, "All green. No incident."), False
