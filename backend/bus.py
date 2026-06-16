@@ -153,16 +153,32 @@ class BandBus(AgentBus):
         }
         return f"{msg.text}{_META_OPEN}{json.dumps(meta)}{_META_CLOSE}"
 
-    def _mentions(self, mentions: list[str]):
-        # A structured Band mention requires the participant's id, so we only
-        # build them for the 5 registered agents. Non-agent mentions (e.g.
-        # "@human") stay in the visible text + embedded meta, not the field.
-        items = []
-        for m in mentions or []:
-            h = m.lstrip("@")
-            aid = os.getenv(f"BAND_{h.upper()}_ID")
-            if aid:
-                items.append(self._Mention(id=aid, handle=h, name=h))
+    def _id_for(self, handle: str) -> Optional[str]:
+        """Resolve a handle to a Band participant id. '@human' -> BAND_HUMAN_ID
+        (optional); the 5 agents -> BAND_<HANDLE>_ID."""
+        h = handle.lstrip("@").lower()
+        if h == "human":
+            return os.getenv("BAND_HUMAN_ID")
+        return os.getenv(f"BAND_{h.upper()}_ID")
+
+    def _mention(self, handle: str):
+        h = handle.lstrip("@").lower()
+        return self._Mention(id=self._id_for(h), handle=h, name=h)
+
+    def _mentions(self, mentions: list[str], sender_handle: str):
+        # Band's create_agent_chat_message REQUIRES mentions to have >=1 item.
+        # Build structured mentions for any handle we can resolve to an id; the
+        # human-readable "@..." text stays untouched in the body.
+        items = [self._mention(m) for m in (mentions or []) if self._id_for(m)]
+        if not items:
+            # GUARANTEE non-empty: fall back to one valid id. Mentioning an agent
+            # has no side effects in our custom integration (no remote loops run);
+            # it only satisfies Band's min-1 rule. Prefer human, else the sender,
+            # else the observer — all of which are configured ids.
+            for cand in ("human", sender_handle, "observer"):
+                if self._id_for(cand):
+                    items.append(self._mention(cand))
+                    break
         return items
 
     def _decode(self, cm) -> Optional[RoomMessage]:
@@ -189,7 +205,7 @@ class BandBus(AgentBus):
             msg.seq = self._seq
         handle = msg.sender.lstrip("@")
         client = self._client_for(handle)
-        request = self._Request(content=self._encode(msg), mentions=self._mentions(msg.mentions))
+        request = self._Request(content=self._encode(msg), mentions=self._mentions(msg.mentions, handle))
         # RestClient is synchronous (httpx.Client) -> offload so we don't block the loop.
         await asyncio.to_thread(
             client.agent_api_messages.create_agent_chat_message,
