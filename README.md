@@ -82,6 +82,77 @@ backend/
   run.py            colored transcript + verdict
 ```
 
+## The Aegis Platform (web dashboard + a second workflow)
+
+The CLI demo above is one slice. The full platform wraps the **same** AgentBus
+pattern in a web app with two agent workflows and real integrations.
+
+```bash
+pip install -r backend/requirements.txt   # pydantic, fastapi, uvicorn, httpx,
+                                           # pdfplumber, python-docx, reportlab
+python -m frontend.server                  # → http://127.0.0.1:8000
+```
+
+Zero keys still boots: the incident **demo** mode and the whole UI run offline.
+Real integrations (email send, Adzuna job search, resume parsing) activate when
+their keys are set — and **fail with a clear message if a key is missing**,
+never a fake success. Copy `backend/.env.example` → `backend/.env` to enable them.
+
+### Dashboard
+Landing page: summary cards (open incidents, avg MTTR, total cost averted,
+incidents resolved 7d, jobs found, applications sent, resumes tailored), a
+newest-first activity feed across both workflows, a connected-services health
+row (email · job API · Featherless · AI/ML · Band), and quick actions.
+
+### Resolve — incidents, made real
+Upload a metrics/log file (JSON/CSV/plain log), paste an artifact, or describe a
+service — `backend/ingest.py` parses it into the telemetry shape the detector
+expects, and the **same** observer→diagnostician→remediator→validator→commander
+pipeline runs on your real data. The commander **pauses in the UI** for human
+Approve/Reject before any irreversible action. On resolution an incident report
+is **emailed** (`backend/email.py`: Resend primary, SMTP fallback). Every run is
+persisted to SQLite.
+
+### Jobs — a second multi-agent workflow (`jobs/`)
+Mirrors the incident package (`contracts.py` · `agents.py` · `orchestrator.py`),
+posting over the same bus. Three entry modes: **by company**, **by field** (15
+roles + free text), or **resume upload** (PDF/DOCX → structured profile via
+pdfplumber/python-docx + LLM). Agents: `@observer` builds a search profile,
+`@validator` pulls **current real postings** (Adzuna, `jobs/providers.py`) and
+scores fit vs the resume, `@commander` gates on your pick, `@tailor` rewrites the
+resume to the posting (downloadable **md + PDF + DOCX**), `@applier` **submits**
+where a real apply method exists or **queues** with a one-click link otherwise —
+and is honest about which (never reports "applied" without a real action).
+
+### History + downloads
+Every incident and job run, filterable by type, newest first. Each opens a
+detailed report (incidents: timeline, diagnosis, validation, fix, cost; jobs:
+profile, ranked matches, tailoring, applications). Download any report as
+**Markdown or PDF** (`backend/reporting.py`).
+
+### Analytics · Integrations · Settings
+**Analytics:** MTTR trend, cumulative cost averted, incident outcomes, and the
+application funnel. **Integrations:** per-service config status + a live **Test**
+button each. **Settings:** key status (values never echoed), incident-report
+recipients, and a default job field. Persistence is stdlib `sqlite3` at
+`data/aegis.db`.
+
+### New platform files
+```
+backend/store.py       SQLite persistence (incidents, jobs, settings) + aggregates
+backend/ingest.py      parse uploaded telemetry → detector timeline
+backend/email.py       incident-report email (Resend + SMTP), fail-loud
+backend/reporting.py   run → Markdown/PDF reports
+backend/health.py      connected-service status + live test checks
+jobs/contracts.py      job-workflow typed payloads
+jobs/providers.py      JobSearchProvider interface + Adzuna implementation
+jobs/resume.py         PDF/DOCX resume → structured profile
+jobs/agents.py         observer · validator · commander · tailor · applier
+jobs/orchestrator.py   drives the job workflow over the bus
+frontend/server.py     platform API (dashboard, resolve, jobs, history, etc.)
+frontend/static/       offline-first React+htm SPA (vendored, no CDN)
+```
+
 ## Going live at kickoff (3 swaps)
 
 1. **Featherless / AI/ML API** — copy `.env.example` to `.env`, paste keys,
