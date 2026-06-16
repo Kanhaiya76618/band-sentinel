@@ -17,12 +17,23 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import json
 import os
+import time
 from typing import Awaitable, Callable, Optional
 
-from .contracts import RoomMessage
+from .contracts import Intent, RoomMessage
 
 Handler = Callable[[RoomMessage], Awaitable[None]]
+
+# The five agent handles -> each has its own Band identity (BAND_<HANDLE>_ID/_KEY).
+BAND_HANDLES = ("observer", "diagnostician", "remediator", "validator", "commander")
+
+# ChatMessageRequest carries only {content, mentions} (no metadata field), so we
+# embed the structured RoomMessage as a fenced block at the end of the body and
+# parse it back on history(). The human-readable text stays first/visible.
+_META_OPEN = "\n\n```aegis\n"
+_META_CLOSE = "\n```"
 
 
 class AgentBus(abc.ABC):
@@ -68,45 +79,149 @@ class LocalBus(AgentBus):
 
 class BandBus(AgentBus):
     """
-    Band-backed room. STUB — fill in at kickoff from the Band Agent API docs.
+    Band-backed room (custom REST + Phoenix-Channels integration).
 
-    The shape Band gives you (per the Hacker Guide): create/join a room, send a
-    message addressed by @mention, and receive messages via a stream/webhook.
-    Map those three calls onto post/subscribe/history below and nothing else in
-    the codebase changes.
+    Identity is PER AGENT: we build one Band REST client per handle from the five
+    BAND_<HANDLE>_ID / BAND_<HANDLE>_KEY pairs, all posting into ONE shared chat
+    (BAND_CHAT_ID). Our deterministic orchestrator DRIVES the cascade through Band
+    by calling post() for each step — so on BandBus every collaboration beat
+    physically happens inside the Band chat, reproducibly.
 
-        env needed at kickoff:
-            BAND_API_KEY=...
-            BAND_ROOM_ID=...      # or create one on first run
+        SDK (band-sdk):
+          SEND     thenvoi_rest.RestClient(api_key=...).agent_api_messages
+                       .create_agent_chat_message(chat_id, message=ChatMessageRequest(...))
+          HISTORY  ...agent_api_messages.list_agent_messages(chat_id, status="all")
+          RECEIVE  band.platform.BandLink (Phoenix WS) — see subscribe() note.
+
+        env (set in backend/.env, BUS=band):
+          BAND_CHAT_ID
+          BAND_OBSERVER_ID/_KEY, BAND_DIAGNOSTICIAN_ID/_KEY, BAND_REMEDIATOR_ID/_KEY,
+          BAND_VALIDATOR_ID/_KEY, BAND_COMMANDER_ID/_KEY
+          BAND_REST_URL (optional, default https://app.band.ai)
     """
 
-    def __init__(self, room_id: Optional[str] = None) -> None:
-        self._handlers: list[Handler] = []
-        self._room_id = room_id or os.getenv("BAND_ROOM_ID")
-        self._api_key = os.getenv("BAND_API_KEY")
-        # import httpx lazily so offline mode needs zero extra deps
-        import httpx  # noqa: F401  (kept here as the live-mode marker)
-        self._client = None  # TODO: httpx.AsyncClient(base_url=..., headers=...)
+    def __init__(self) -> None:
+        # Import the SDK lazily so offline mode (BUS=local) needs none of it.
+        from thenvoi_rest import (
+            ChatMessageRequest, ChatMessageRequestMentionsItem, RestClient,
+        )
+        self._RestClient = RestClient
+        self._Request = ChatMessageRequest
+        self._Mention = ChatMessageRequestMentionsItem
+
+        self._chat_id = os.getenv("BAND_CHAT_ID")
+        self._rest_url = os.getenv("BAND_REST_URL", "https://app.band.ai")
+        self._clients: dict[str, object] = {}
+        self._seq = 0
+        self._lock = asyncio.Lock()
+
+        # Fail loud, naming every empty var — never a fake send.
+        missing: list[str] = []
+        if not self._chat_id:
+            missing.append("BAND_CHAT_ID")
+        for h in BAND_HANDLES:
+            if not os.getenv(f"BAND_{h.upper()}_ID"):
+                missing.append(f"BAND_{h.upper()}_ID")
+            if not os.getenv(f"BAND_{h.upper()}_KEY"):
+                missing.append(f"BAND_{h.upper()}_KEY")
+        if missing:
+            raise RuntimeError(
+                "BandBus not configured — set these env vars in backend/.env "
+                "(or run with BUS=local): " + ", ".join(missing)
+            )
+
+    # ---- per-agent clients --------------------------------------------- #
+    def _client_for(self, handle: str):
+        if handle not in BAND_HANDLES:
+            raise RuntimeError(
+                f"BandBus: no Band identity for sender '@{handle}'. "
+                f"Known handles: {', '.join(BAND_HANDLES)}."
+            )
+        if handle not in self._clients:
+            key = os.getenv(f"BAND_{handle.upper()}_KEY")
+            if not key:
+                raise RuntimeError(f"BandBus: env BAND_{handle.upper()}_KEY is empty.")
+            self._clients[handle] = self._RestClient(api_key=key, base_url=self._rest_url)
+        return self._clients[handle]
+
+    # ---- serialization -------------------------------------------------- #
+    def _encode(self, msg: RoomMessage) -> str:
+        meta = {
+            "sender": msg.sender, "mentions": msg.mentions,
+            "intent": msg.intent.value, "text": msg.text,
+            "payload": msg.payload, "seq": msg.seq,
+        }
+        return f"{msg.text}{_META_OPEN}{json.dumps(meta)}{_META_CLOSE}"
+
+    def _mentions(self, mentions: list[str]):
+        # A structured Band mention requires the participant's id, so we only
+        # build them for the 5 registered agents. Non-agent mentions (e.g.
+        # "@human") stay in the visible text + embedded meta, not the field.
+        items = []
+        for m in mentions or []:
+            h = m.lstrip("@")
+            aid = os.getenv(f"BAND_{h.upper()}_ID")
+            if aid:
+                items.append(self._Mention(id=aid, handle=h, name=h))
+        return items
+
+    def _decode(self, cm) -> Optional[RoomMessage]:
+        content = cm.content or ""
+        if _META_OPEN not in content:
+            return None  # not one of our cascade messages — skip
+        text, rest = content.split(_META_OPEN, 1)
+        try:
+            meta = json.loads(rest.rsplit(_META_CLOSE, 1)[0])
+            intent = Intent(meta["intent"])
+        except (ValueError, KeyError, json.JSONDecodeError):
+            return None
+        ts = cm.inserted_at.timestamp() if getattr(cm, "inserted_at", None) else time.time()
+        return RoomMessage(
+            seq=meta.get("seq", 0), sender=meta.get("sender", f"@{getattr(cm, 'sender_name', '?')}"),
+            mentions=meta.get("mentions", []), intent=intent,
+            text=meta.get("text", text), payload=meta.get("payload", {}), ts=ts,
+        )
+
+    # ---- AgentBus interface -------------------------------------------- #
+    async def post(self, msg: RoomMessage) -> None:
+        async with self._lock:
+            self._seq += 1
+            msg.seq = self._seq
+        handle = msg.sender.lstrip("@")
+        client = self._client_for(handle)
+        request = self._Request(content=self._encode(msg), mentions=self._mentions(msg.mentions))
+        # RestClient is synchronous (httpx.Client) -> offload so we don't block the loop.
+        await asyncio.to_thread(
+            client.agent_api_messages.create_agent_chat_message,
+            self._chat_id, message=request,
+        )
 
     def subscribe(self, handler: Handler) -> None:
-        self._handlers.append(handler)
-        # TODO: open Band's message stream for self._room_id and, for each
-        # inbound event, build a RoomMessage and `await handler(msg)`.
-
-    async def post(self, msg: RoomMessage) -> None:
-        # TODO: POST msg to Band's "send message to room" endpoint, e.g.
-        #   await self._client.post(f"/rooms/{self._room_id}/messages",
-        #       json={"sender": msg.sender, "mentions": msg.mentions,
-        #             "intent": msg.intent.value, "text": msg.text,
-        #             "payload": msg.payload})
         raise NotImplementedError(
-            "BandBus.post: wire to Band Agent API at kickoff. "
-            "Until then run with BUS=local."
+            "BandBus.subscribe: the Phoenix-Channels receive path "
+            "(band.platform.BandLink: connect() -> subscribe_room(BAND_CHAT_ID) -> "
+            "get_next_message()) is available for a follow-up pass. It isn't required for "
+            "the incident cascade: the deterministic orchestrator DRIVES the room via post() "
+            "and the transcript is read back via history(). PlatformMessage's fields aren't "
+            "statically introspectable, so the inbound mapping is deferred rather than guessed."
         )
 
     async def history(self) -> list[RoomMessage]:
-        # TODO: GET the room transcript and map each item back to RoomMessage.
-        raise NotImplementedError("BandBus.history: wire to Band Agent API.")
+        # Any participant's client can read the shared chat; use the first configured.
+        client = self._client_for(BAND_HANDLES[0])
+        resp = await asyncio.to_thread(
+            lambda: client.agent_api_messages.list_agent_messages(
+                self._chat_id, status="all", page_size=200)
+        )
+        out: list[RoomMessage] = []
+        for cm in (getattr(resp, "data", None) or []):
+            rm = self._decode(cm)
+            if rm:
+                out.append(rm)
+        out.sort(key=lambda r: r.ts)
+        for i, r in enumerate(out, 1):
+            r.seq = i
+        return out
 
 
 def make_bus() -> AgentBus:
