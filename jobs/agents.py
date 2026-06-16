@@ -14,8 +14,14 @@ natural-language line; the logic underneath is real Python.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
+
+
+def _offline() -> bool:
+    """OfflineLLM echoes its prompt, so skip generative calls when offline."""
+    return os.getenv("LLM_MODE", "offline").lower() == "offline"
 
 from backend.contracts import Intent, RoomMessage
 from backend.llm import LLMClient
@@ -182,7 +188,7 @@ class Tailor(JobAgent):
             f"{summary} Targeting **{match.title}** at **{match.company}**, with strength in "
             f"{', '.join(posting_kw[:6]) or 'the listed requirements'}."
         )
-        live = self.llm.complete(
+        live = "" if _offline() else self.llm.complete(
             system="Rewrite this resume summary to match a job posting. 2 sentences max.",
             user=f"Posting: {match.title} at {match.company}. {match.description[:600]}\n\n"
                  f"Candidate summary: {summary}", role="@tailor", tag="rewrite",
@@ -257,7 +263,7 @@ class Applier(JobAgent):
             f"aligns closely with what you're looking for, and I'd welcome the chance to "
             f"contribute to your team.\n\nBest regards,\nThe candidate"
         )
-        live = self.llm.complete(
+        live = "" if _offline() else self.llm.complete(
             system="Write a concise 4-sentence cover letter. Professional, specific.",
             user=f"Role: {match.title} at {match.company}. Candidate skills: {top}. "
                  f"Posting: {match.description[:400]}", role="@applier", tag="cover",
