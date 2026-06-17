@@ -11,6 +11,5 @@ this runtime — and we never report an action that didn't happen.
     telegram.py  Bot API — FULL loop (send + inline Approve/Reject via long-poll)
     discord.py   webhook/bot — notify + post (inbound buttons need a gateway)
     whatsapp.py  Twilio sandbox — notify (+ inbound approval via webhook)
-    twitter.py   X API v2 — post (read/search best-effort)
     linkedin.py  OAuth — share a post / draft only (NO search/apply: API forbids)
 """

@@ -12,14 +12,13 @@ from .base import Channel, CommandHandler
 from .discord import DiscordChannel
 from .linkedin import LinkedInChannel
 from .telegram import TelegramChannel
-from .twitter import TwitterChannel
 from .whatsapp import WhatsAppChannel
 
 # Build order matters for display (Telegram first — the full loop).
 CHANNELS: dict[str, Channel] = {
     c.name: c for c in (
         TelegramChannel(), DiscordChannel(), WhatsAppChannel(),
-        TwitterChannel(), LinkedInChannel(),
+        LinkedInChannel(),
     )
 }
 
