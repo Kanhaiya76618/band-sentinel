@@ -5,6 +5,15 @@ specialist agents converge in one Band room, find the root cause, **prove** a fi
 against a chaos replay, take one human approval, fail over, and auto-write the
 postmortem — collapsing MTTR from ~42 minutes to ~1.5.
 
+**The problem.** On-call is the worst seat in engineering: a 3am page, a scramble
+to assemble a war room, ~42 minutes of mean-time-to-resolve while revenue bleeds
+and one person guesses under pressure. Aegis runs that war room autonomously —
+five agents that argue from evidence — and asks a human for exactly one thing: the
+go/no-go on the single irreversible action.
+
+📺 **Landing page + demo video:** open `frontend/static/landing.html` directly, or
+hit **`GET /landing`** on the running server (`python -m frontend.server`).
+
 Built for the **Band of Agents Hackathon** (lablab.ai). Fuses four of the "23
 projects that get you hired": log/metric **anomaly detection** (#13),
 **chaos testing** (#14), **multi-region failover** (#15), and **cloud cost**
@@ -55,7 +64,7 @@ You'll see the Band-room transcript:
             │                         │ execute → RESOLVED → postmortem │
             └─────────────────────────────────────────────────────────┘
 
-every arrow is a RoomMessage on the AgentBus  →  LocalBus now, BandBus at kickoff
+every arrow is a RoomMessage on the AgentBus  →  LocalBus offline, BandBus live (BUS=band)
 ```
 
 Provider split (scores "collaborate across frameworks" + targets BOTH partner prizes):
@@ -73,7 +82,7 @@ Provider split (scores "collaborate across frameworks" + targets BOTH partner pr
 ```
 backend/
   contracts.py      typed message schema (the room's shared language)
-  bus.py            AgentBus + LocalBus (now) + BandBus stub (kickoff swap)
+  bus.py            AgentBus + LocalBus (offline) + BandBus (live Band room)
   llm.py            OfflineLLM (zero keys) + AI/ML API + Featherless clients
   mockservice.py    fault-injectable service + the chaos-replay simulator
   detector.py       z-score anomaly detection over a rolling baseline (#13)
@@ -178,15 +187,20 @@ frontend/server.py     platform API (dashboard, resolve, jobs, history, channels
 frontend/static/       offline-first React+htm SPA (vendored, no CDN)
 ```
 
-## Going live at kickoff (3 swaps)
+## Going live (point it at your own Band + providers)
 
-1. **Featherless / AI/ML API** — copy `.env.example` to `.env`, paste keys,
-   confirm each `BASE_URL`/`MODEL` against the provider setup guide, set
-   `LLM_MODE=aiml`. The OfflineLLM phrasing is replaced by real model output;
-   logic is unchanged.
-2. **Band** — fill the three `TODO`s in `BandBus` (post / subscribe / history)
-   from the Band Agent API docs, set `BUS=band` and `BAND_*` env vars.
-3. Run `LLM_MODE=aiml BUS=band python -m backend.run`. Same code, now live in Band.
+The offline run needs zero keys. To run the **same code** live, copy
+`backend/.env.example` → `backend/.env` and fill in:
+
+1. **Band** (already implemented) — register 5 remote agents, add all 5 to ONE
+   shared chat, set each `BAND_<AGENT>_ID`/`_KEY` + `BAND_CHAT_ID`, then `BUS=band`.
+   `BandBus.post`/`history` drive and read back the cascade in a real Band room
+   (the Phoenix-Channels inbound `subscribe` path is stubbed — not needed, since
+   the orchestrator drives the room deterministically).
+2. **Featherless / AI/ML API** — paste keys, confirm each `BASE_URL`/`MODEL`
+   against the provider setup guide, set `LLM_MODE=aiml`. OfflineLLM phrasing is
+   replaced by real model output; the logic is unchanged.
+3. Run `LLM_MODE=aiml BUS=band python -m backend.run` — same code, now live in Band.
 
 ## 3-minute demo script
 

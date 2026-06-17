@@ -26,15 +26,20 @@ MANIFEST
 # Virtual environments
 venv/
 .venv
+.venv/
 env/
 ENV/
 env.bak/
 venv.bak/
 
-# Environment variables
+# Environment variables — NEVER commit real secrets (keep only the example)
 .env
+*.env
+backend/.env
 .env.local
 .env.*.local
+!.env.example
+!*.env.example
 
 # IDE/Editor files
 .vscode/
@@ -90,8 +95,10 @@ Desktop.ini
 # Linux
 .directory
 
-# Database
+# Database (incl. SQLite WAL/SHM sidecars)
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 
