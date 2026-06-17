@@ -64,14 +64,21 @@ async def run_incident(
 
     t0 = time.perf_counter()
     timeline: list[str] = []
+    # Accumulate every posted RoomMessage locally and drive display + metrics off
+    # THIS list — never bus.history(). LocalBus.history() returns the posts, but
+    # BandBus.history() reads them back from Band in a form that isn't usable here
+    # (empty transcript -> no console output, MTTR sum -> 0). Collecting as we post
+    # makes the console + MTTR identical offline and on Band.
+    posted: list[RoomMessage] = []
 
     def log(m: RoomMessage) -> None:
+        posted.append(m)
         timeline.append(f"{m.sender}: {m.text}")
 
     # 1) Observer opens the incident (on uploaded telemetry when provided)
     sig_msg, real = await _post(bus, observer.open_incident(s, telemetry), log)
     if not real:
-        return await bus.history(), {}
+        return posted, {}
     sig = Signal(**sig_msg.payload)
 
     # 2) Diagnostician forms a root-cause hypothesis
@@ -93,7 +100,7 @@ async def run_incident(
             break
 
     if not approved_rem:
-        return await bus.history(), {"resolved": False}
+        return posted, {"resolved": False}
 
     # 4) Human-approval gate for the irreversible action
     if not approved_rem.reversible:
@@ -102,7 +109,7 @@ async def run_incident(
             # Real HITL gate: block until the UI sends Approve/Reject.
             granted = await approve()
             if not granted:
-                return await bus.history(), {
+                return posted, {
                     "resolved": False, "rejected_by": "human:oncall",
                     "rejected_action": approved_rem.action,
                 }
@@ -112,7 +119,7 @@ async def run_incident(
 
     # 5) Execute + resolve. MTTR is modeled from the steps so far; decision
     #    latency is the real agent wall-clock (the speed flex).
-    modeled_mttr = sum(MODELED_SECONDS.get(m.intent, 0.0) for m in await bus.history())
+    modeled_mttr = sum(MODELED_SECONDS.get(m.intent, 0.0) for m in posted)
     latency_ms = (time.perf_counter() - t0) * 1000.0
     dec_msg = await _post(
         bus, commander.execute(s, approved_rem, approved_vr, approver, modeled_mttr, latency_ms), log
@@ -134,7 +141,7 @@ async def run_incident(
         "averted_cost_usd": dec.averted_cost_usd,
         "attempts": 2,
     }
-    return await bus.history(), verdict
+    return posted, verdict
 
 
 async def _post(bus: AgentBus, produced, log):
