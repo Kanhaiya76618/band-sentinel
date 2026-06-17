@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Aegis — the autonomous on-call engineer</title>
+<meta name="description" content="A multi-agent incident-response war room on Band. Five agents find the root cause, prove a fix against a chaos replay, take one human approval, and fail over — MTTR 42m → 1.5m." />
+<style>
+  :root {
+    --bg: #0a0e17;
+    --panel: #111726;
+    --panel-2: #0d1320;
+    --line: #1f2a3d;
+    --txt: #e6edf6;
+    --muted: #8092ad;
+    --accent: #6ea8fe;
+    --observer: #22d3ee;
+    --diagnostician: #60a5fa;
+    --remediator: #fbbf24;
+    --validator: #f87171;
+    --commander: #4ade80;
+    --pass: #34d399;
+    --reject: #fb5d5d;
+    --maxw: 1080px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    font: 15px/1.6 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    background:
+      radial-gradient(1200px 600px at 75% -10%, #15203a 0%, var(--bg) 55%),
+      var(--bg);
+    color: var(--txt);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+  section { padding: 64px 0; border-top: 1px solid var(--line); }
+  h1, h2, h3 { line-height: 1.2; margin: 0 0 12px; }
+  h2 { font-size: 26px; letter-spacing: .3px; }
+  h2 .tag { color: var(--muted); font-weight: 400; font-size: 14px; }
+  p { color: #c4d0e2; }
+  .muted { color: var(--muted); }
+
+  /* ── top bar ─────────────────────────────────────────────── */
+  .topbar {
+    position: sticky; top: 0; z-index: 20;
+    background: rgba(10,14,23,.82); backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .topbar .wrap { display: flex; align-items: center; gap: 16px; height: 56px; }
+  .brand { font-weight: 700; letter-spacing: .5px; }
+  .brand .dot { color: var(--commander); }
+  .topbar nav { margin-left: auto; display: flex; gap: 20px; font-size: 13px; }
+  .topbar nav a { color: var(--muted); }
+  .topbar nav a:hover { color: var(--txt); text-decoration: none; }
+
+  /* ── hero ────────────────────────────────────────────────── */
+  .hero { padding: 84px 0 64px; border-top: none; text-align: center; }
+  .kicker {
+    display: inline-block; font-size: 12px; letter-spacing: 2px; text-transform: uppercase;
+    color: var(--accent); border: 1px solid var(--line); border-radius: 999px;
+    padding: 5px 14px; margin-bottom: 22px; background: var(--panel-2);
+  }
+  .hero h1 { font-size: clamp(30px, 5vw, 50px); letter-spacing: .5px; }
+  .hero .one-liner { font-size: clamp(16px, 2.2vw, 20px); color: #c8d4e6; max-width: 760px; margin: 8px auto 0; }
+  .cta-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; margin-top: 30px; }
+  .btn {
+    display: inline-block; padding: 12px 22px; border-radius: 10px; font-weight: 600;
+    border: 1px solid var(--line); background: var(--panel); color: var(--txt);
+  }
+  .btn:hover { border-color: var(--accent); text-decoration: none; }
+  .btn.primary { background: linear-gradient(180deg, #2b6cff, #1f54d6); border-color: #2b6cff; color: #fff; }
+  .btn.primary:hover { filter: brightness(1.08); }
+
+  /* ── stat band ───────────────────────────────────────────── */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 48px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px; text-align: left; }
+  .stat .big { font-size: 26px; font-weight: 700; }
+  .stat .big.good { color: var(--commander); }
+  .stat .lbl { color: var(--muted); font-size: 12px; margin-top: 4px; }
+
+  /* ── generic grid + cards ────────────────────────────────── */
+  .grid { display: grid; gap: 14px; }
+  .cols-3 { grid-template-columns: repeat(3, 1fr); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; }
+  .card h3 { font-size: 15px; }
+  .card p { font-size: 13.5px; margin: 0; }
+
+  /* ── agents ──────────────────────────────────────────────── */
+  .agents { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin-top: 8px; }
+  .agent { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--c); border-radius: 12px; padding: 16px; }
+  .agent .h { color: var(--c); font-weight: 700; font-size: 14px; }
+  .agent .role { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin: 2px 0 8px; }
+  .agent p { font-size: 12.5px; color: #b9c6da; }
+
+  /* ── reject-then-fix transcript ──────────────────────────── */
+  .beat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-top: 18px; }
+  .line { display: flex; gap: 10px; padding: 4px 0; font-size: 13.5px; flex-wrap: wrap; }
+  .line .who { min-width: 130px; font-weight: 700; }
+  .who.observer { color: var(--observer); }
+  .who.diagnostician { color: var(--diagnostician); }
+  .who.remediator { color: var(--remediator); }
+  .who.validator { color: var(--validator); }
+  .who.commander { color: var(--commander); }
+  .pill { font-size: 11px; padding: 1px 8px; border-radius: 999px; font-weight: 700; }
+  .pill.reject { background: rgba(251,93,93,.15); color: var(--reject); border: 1px solid rgba(251,93,93,.4); }
+  .pill.pass { background: rgba(52,211,153,.15); color: var(--pass); border: 1px solid rgba(52,211,153,.4); }
+  .callout { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; margin-top: 18px; color: #cdd9ea; }
+
+  /* ── video ───────────────────────────────────────────────── */
+  .video-frame {
+    position: relative; width: 100%; aspect-ratio: 16 / 9; margin-top: 8px;
+    background: #05080f; border: 1px dashed #33507f; border-radius: 14px; overflow: hidden;
+  }
+  .video-frame iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .video-placeholder {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; text-align: center; padding: 24px;
+    background:
+      radial-gradient(600px 300px at 50% 30%, #14233f 0%, #070b13 70%);
+  }
+  .video-placeholder .play {
+    width: 74px; height: 74px; border-radius: 50%; display: grid; place-items: center;
+    background: rgba(110,168,254,.12); border: 1px solid var(--accent); color: var(--accent); font-size: 28px;
+  }
+  .video-placeholder .t { font-weight: 700; letter-spacing: 1px; }
+  .video-placeholder code { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; color: var(--remediator); }
+
+  /* ── tech / partners ─────────────────────────────────────── */
+  .tech { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .tech .card .h { font-weight: 700; }
+  .tech .band .h { color: var(--commander); }
+  .tech .feather .h { color: var(--validator); }
+  .tech .aiml .h { color: var(--observer); }
+
+  /* ── quickstart ──────────────────────────────────────────── */
+  pre {
+    background: #05080f; border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px 18px; overflow-x: auto; color: #d4e0f0; font-size: 13px; line-height: 1.7;
+  }
+  pre .c { color: var(--muted); }
+  pre .k { color: var(--remediator); }
+
+  footer { border-top: 1px solid var(--line); padding: 32px 0 56px; color: var(--muted); font-size: 12.5px; }
+
+  @media (max-width: 860px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .cols-3, .tech { grid-template-columns: 1fr; }
+    .agents { grid-template-columns: repeat(2, 1fr); }
+    .line .who { min-width: 0; width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="wrap">
+    <span class="brand">AEGIS<span class="dot">.</span></span>
+    <nav>
+      <a href="#problem">Problem</a>
+      <a href="#war-room">War room</a>
+      <a href="#numbers">Numbers</a>
+      <a href="#demo">Demo</a>
+      <a href="#stack">Stack</a>
+      <a href="#start">Run it</a>
+    </nav>
+  </div>
+</div>
+
+<!-- ── HERO ─────────────────────────────────────────────────── -->
+<header class="hero">
+  <div class="wrap">
+    <span class="kicker">Band of Agents Hackathon</span>
+    <h1>The autonomous on-call engineer<br>that never sleeps.</h1>
+    <p class="one-liner">
+      A multi-agent incident-response war room on <strong>Band</strong>. Five specialist
+      agents find the root cause, <strong>prove</strong> a fix against a chaos replay,
+      take one human approval, fail over, and auto-write the postmortem —
+      collapsing MTTR from <strong>~42 minutes to ~1.5</strong>.
+    </p>
+    <div class="cta-row">
+      <a class="btn primary" href="#demo">▶ Watch the demo</a>
+      <a class="btn" href="/">Launch the live console →</a>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="big">42m → 1.5m</div><div class="lbl">Mean time to resolve (modeled)</div></div>
+      <div class="stat"><div class="big good">~$38k</div><div class="lbl">Downtime cost averted / incident</div></div>
+      <div class="stat"><div class="big">5</div><div class="lbl">Agents · 2 frameworks · 2 providers</div></div>
+      <div class="stat"><div class="big">1</div><div class="lbl">Human approval — only the irreversible step</div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ── PROBLEM ──────────────────────────────────────────────── -->
+<section id="problem">
+  <div class="wrap">
+    <h2>The problem <span class="tag">// on-call is the worst seat in engineering</span></h2>
+    <p style="max-width:820px">
+      A 3am page. A scramble to assemble a war room. ~42 minutes of mean-time-to-resolve
+      while revenue bleeds and one tired person guesses under pressure — scale it? roll it
+      back? fail over? — with no way to <em>prove</em> the fix before touching prod.
+    </p>
+    <div class="grid cols-3" style="margin-top:18px">
+      <div class="card"><h3>Pages don't reason</h3><p class="muted">A Slack alert tells you something broke. It can't diagnose, can't argue, can't disprove a bad fix.</p></div>
+      <div class="card"><h3>Linear bots overreach</h3><p class="muted">Planner→executor agents happily execute the first plausible action. Nobody plays skeptic.</p></div>
+      <div class="card"><h3>Fixes go in unproven</h3><p class="muted">"Scale the pods" looks fine — until the leak saturates anyway. You find out in prod.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── WAR ROOM + REJECT-THEN-FIX ───────────────────────────── -->
+<section id="war-room">
+  <div class="wrap">
+    <h2>The 5-agent war room <span class="tag">// adversarial, not a pipeline</span></h2>
+    <div class="agents">
+      <div class="agent" style="--c:var(--observer)">
+        <div class="h">@observer</div><div class="role">Detect</div>
+        <p>z-score anomaly detection over a rolling baseline; correlates the spike to a deploy and opens the room.</p>
+      </div>
+      <div class="agent" style="--c:var(--diagnostician)">
+        <div class="h">@diagnostician</div><div class="role">Root cause</div>
+        <p>Forms a confidence-scored hypothesis from the evidence — "memory leak from v2.3.1," not a guess.</p>
+      </div>
+      <div class="agent" style="--c:var(--remediator)">
+        <div class="h">@remediator</div><div class="role">Propose</div>
+        <p>Proposes a fix — and revises it when the validator shoots the first one down.</p>
+      </div>
+      <div class="agent" style="--c:var(--validator)">
+        <div class="h">@validator</div><div class="role">Disprove</div>
+        <p>Runs a chaos replay and holds a <strong>veto</strong>. Rejects fixes that still breach SLO.</p>
+      </div>
+      <div class="agent" style="--c:var(--commander)">
+        <div class="h">@commander</div><div class="role">Gate & execute</div>
+        <p>Gates the one irreversible action on a human, executes, and files the postmortem.</p>
+      </div>
+    </div>
+
+    <div class="beat">
+      <div class="line"><span class="who observer">@observer</span><span>SEV1 on checkout-api/us-east-1 — p99 z=578, right after deploy v2.3.1. Opening the room.</span></div>
+      <div class="line"><span class="who diagnostician">@diagnostician</span><span>Root cause: memory leak from v2.3.1 (conf 86%). p99 tracks memory, not traffic.</span></div>
+      <div class="line"><span class="who remediator">@remediator</span><span>Fix #1: scale 6 → 12 pods.</span></div>
+      <div class="line"><span class="who validator">@validator</span><span class="pill reject">REJECTED</span><span>Chaos replay still breaches: p99 8000ms, errors 12.8%. Leak is unbounded — pods won't hold.</span></div>
+      <div class="line"><span class="who remediator">@remediator</span><span>Revised: roll back v2.3.1 <em>and</em> fail over to us-west-2.</span></div>
+      <div class="line"><span class="who validator">@validator</span><span class="pill pass">PASSED</span><span>Replay clean: p99 308ms, 0% errors, within SLO. Safe to execute with approval.</span></div>
+      <div class="line"><span class="who commander">@commander</span><span>Irreversible → asks @human → approved → executes → <strong>RESOLVED</strong>. Postmortem filed.</span></div>
+    </div>
+
+    <div class="callout">
+      <strong>The reject-then-fix beat is the differentiator.</strong> One agent <em>disproves</em>
+      another's fix mid-incident, with evidence it generated itself — a chaos replay. That argument
+      is a thing a notification channel physically cannot do. The reject is <em>computed</em>, not
+      scripted: change the scenario and the verdict changes.
+    </div>
+  </div>
+</section>
+
+<!-- ── NUMBERS ──────────────────────────────────────────────── -->
+<section id="numbers">
+  <div class="wrap">
+    <h2>The numbers <span class="tag">// business value in one screen</span></h2>
+    <div class="grid cols-3">
+      <div class="card"><h3 style="color:var(--commander)">MTTR 42m → 1.5m</h3><p class="muted">Modeled mean-time-to-resolve vs a ~42-minute manual incident — a 28× collapse.</p></div>
+      <div class="card"><h3 style="color:var(--commander)">~$38k averted</h3><p class="muted">Downtime cost avoided per incident, quantified from the service's revenue-at-risk.</p></div>
+      <div class="card"><h3 style="color:var(--commander)">$35 to fix</h3><p class="muted">Remediation cost. The economics aren't close — and they're computed, not asserted.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── DEMO VIDEO ───────────────────────────────────────────── -->
+<section id="demo">
+  <div class="wrap">
+    <h2>Watch it resolve an incident <span class="tag">// 3 minutes, live in a Band room</span></h2>
+    <!--
+      ▶ DEMO VIDEO SLOT
+      Replace DEMO_VIDEO_URL below with your YouTube/Loom EMBED url, e.g.
+        https://www.youtube.com/embed/XXXXXXXXXXX
+        https://www.loom.com/embed/XXXXXXXXXXXXXXXX
+      The placeholder overlay auto-hides once src is no longer "DEMO_VIDEO_URL".
+    -->
+    <div class="video-frame">
+      <iframe id="demoVideo"
+              src="DEMO_VIDEO_URL"
+              title="Aegis — multi-agent incident response demo"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+              allowfullscreen></iframe>
+      <div class="video-placeholder" id="videoPlaceholder">
+        <div class="play">▶</div>
+        <div class="t">DEMO VIDEO</div>
+        <div class="muted">Replace <code>DEMO_VIDEO_URL</code> in <code>landing.html</code> with your YouTube / Loom embed link</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── STACK ────────────────────────────────────────────────── -->
+<section id="stack">
+  <div class="wrap">
+    <h2>How it's built <span class="tag">// Band is the coordination layer, not a channel</span></h2>
+    <p style="max-width:840px">
+      Agents never talk directly. Every inter-agent message is a <code>RoomMessage</code> posted to a
+      shared <code>AgentBus</code>. Flip one config value and the <em>exact same agent code</em> runs
+      in a real Band room — so every collaboration beat physically happens inside Band.
+    </p>
+    <div class="tech">
+      <div class="card band"><div class="h">⬡ Band</div><p class="muted">The shared agent room. Per-agent identities post into one chat over the band-sdk REST API; the orchestrator drives the cascade through Band, reproducibly. <code>BUS=band</code>.</p></div>
+      <div class="card feather"><div class="h">✦ Featherless AI</div><p class="muted">Powers <strong>@diagnostician</strong> &amp; <strong>@validator</strong> (the skeptics). Open-model inference behind the CrewAI agents.</p></div>
+      <div class="card aiml"><div class="h">✦ AI/ML API</div><p class="muted">Powers <strong>@observer</strong>, <strong>@remediator</strong> &amp; <strong>@commander</strong> behind the LangGraph agents.</p></div>
+    </div>
+    <p class="muted" style="margin-top:14px">
+      Cross-framework (LangGraph ⇄ CrewAI ⇄ orchestrator) and cross-provider (AI/ML API + Featherless)
+      by design — five agents, two frameworks, two model providers, one Band room.
+    </p>
+  </div>
+</section>
+
+<!-- ── QUICKSTART ───────────────────────────────────────────── -->
+<section id="start">
+  <div class="wrap">
+    <h2>Run it now <span class="tag">// zero keys, deterministic</span></h2>
+    <pre><span class="c"># 1) Offline spine — no keys, no network, fully reproducible</span>
+pip install pydantic
+python -m backend.run
+
+<span class="c"># 2) The full platform (web dashboard + a second agent workflow)</span>
+pip install -r backend/requirements.txt
+python -m frontend.server        <span class="c"># → http://127.0.0.1:8000  (this page: /landing)</span>
+
+<span class="c"># 3) Go live in a real Band room (same code)</span>
+cp backend/.env.example backend/.env   <span class="c"># add your Band + provider keys</span>
+<span class="k">LLM_MODE</span>=aiml <span class="k">BUS</span>=band python -m backend.run</pre>
+    <div class="cta-row" style="justify-content:flex-start">
+      <a class="btn primary" href="/">Launch the live console →</a>
+      <a class="btn" href="#demo">▶ Watch the demo</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    Aegis — multi-agent incident response on Band · MTTR 42m → 1.5m · ~$38k averted/incident.
+    The offline demo needs zero keys; real integrations fail loud if a key is missing — never a fake success.
+  </div>
+</footer>
+
+<script>
+  // Keep the placeholder visible until a real embed URL is wired in.
+  (function () {
+    var f = document.getElementById('demoVideo');
+    var ph = document.getElementById('videoPlaceholder');
+    if (!f || !ph) return;
+    var src = f.getAttribute('src');
+    if (!src || src === 'DEMO_VIDEO_URL') {
+      f.removeAttribute('src');     // avoid a 404 navigation on the placeholder string
+      ph.style.display = 'flex';    // show the clearly-marked slot
+    } else {
+      ph.style.display = 'none';    // real video wired in → reveal it
+    }
+  })();
+</script>
+
+</body>
+</html>
