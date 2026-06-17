@@ -113,6 +113,12 @@ async def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/landing")
+async def landing() -> FileResponse:
+    """Public marketing/submission page (hero, problem, agents, demo video)."""
+    return FileResponse(STATIC / "landing.html")
+
+
 # --------------------------------------------------------------------------- #
 # Platform API
 # --------------------------------------------------------------------------- #
