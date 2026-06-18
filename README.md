@@ -168,9 +168,34 @@ approve-then-share post draft. Each channel shows status + a **Send test** butto
 on the Integrations page. Any channel without a token stays disabled with a clear
 message — never faked. Keys: see the "Channels" block in `.env.example`.
 
+### Accounts & per-user behavior (Phase 7)
+Sign in / sign up lives on the landing page (email + password). Auth is
+**demo-grade, not production-hardened** — but it's honest: passwords are
+**pbkdf2-hashed** in SQLite (stdlib, never plaintext), sessions are random tokens
+in an **httpOnly cookie** with an expiry, signup rejects duplicates ("account
+exists — sign in") and passwords under 8 chars. Unauthenticated requests are
+redirected to the landing page (app routes) or get `401` (API). Incidents, jobs,
+and history are **scoped to the signed-in user**. *(No rate-limiting, email
+verification, password reset, or CSRF tokens — add those before any real use.)*
+
+Email is **per-user and never silent**:
+- We never send **as** your mailbox. Envelope From stays the verified `EMAIL_FROM`;
+  **Reply-To** = your account email, with a "sent by &lt;you&gt;" line in the body.
+- Sending an incident report **prompts for a recipient** (prefilled with your
+  email, editable, remembers recent ones) and requires a **confirm click**.
+- **Rebuild resume for a company** (Jobs → *Rebuild → email*): upload or reuse your
+  parsed resume + a target company/role; the tailor agent rewrites it (**md + PDF +
+  DOCX**) and **emails it to you** with the files **attached**. The tailor **never
+  fabricates** — it reorders/re-emphasizes your *real* experience and surfaces
+  missing posting keywords as a separate **"gaps to consider"** note.
+- If email isn't configured you still get the files to **download** — no crash. On
+  Resend's free tier (no verified domain) non-verified recipients are flagged
+  clearly ("use SMTP or verify a domain"), never failed silently.
+
 ### New platform files
 ```
-backend/store.py       SQLite persistence (incidents, jobs, settings) + aggregates
+backend/auth.py        demo-grade auth — pbkdf2 hashing + session tokens (stdlib)
+backend/store.py       SQLite persistence (incidents, jobs, settings, users, sessions)
 backend/ingest.py      parse uploaded telemetry → detector timeline
 backend/email.py       incident-report email (Resend + SMTP), fail-loud
 backend/reporting.py   run → Markdown/PDF reports
@@ -187,6 +212,65 @@ frontend/server.py     platform API (dashboard, resolve, jobs, history, channels
 frontend/static/       offline-first React+htm SPA (vendored, no CDN)
 ```
 
+## Live agents on Band — `band_live` (the strongest "Band is the coordination layer" proof)
+
+`BandBus` (above) has our deterministic orchestrator post each step into Band.
+**`band_live/` goes further**: all **five** agents become *independent Band remote
+agents* — built on the band-sdk **adapter model** (`band.Agent.create` +
+`SimpleAdapter`) — that each run their own listener loop, subscribe to the shared
+chat over Phoenix-Channels, and **react only to their own @mentions through Band**.
+Nothing scripts the order: each agent decides its next move from the message it
+receives and hands off with `tools.send_message(..., mentions=[…])`.
+
+```bash
+python -m band_live          # needs the BAND_* creds in backend/.env
+```
+
+The runner launches all five, seeds ONE monitoring trigger (@observer), then the
+entire incident — including the reject-then-fix loop **and the human approval
+gate** — emerges purely from real @mention handoffs **inside Band**:
+
+```
+🚨 monitoring     SEV1 alert fired on checkout-api/us-east-1            → @observer
+🛰  observer       SEV1 signal (z-score anomaly, post-deploy v2.3.1)     → @diagnostician
+🩺 diagnostician  hypothesis: memory leak from deploy v2.3.1            → @remediator
+🛠  remediator    proposal #1: scale 6 → 12 pods                        → @validator
+🚫 validator      REJECT — chaos replay p99 8000ms, still breaches SLO  → @remediator
+🛠  remediator    proposal #2: roll back v2.3.1 + failover us-west-2    → @validator
+✅ validator      PASS — chaos replay p99 308ms, within SLO            → @commander
+🛡  commander      irreversible → RECRUITS @security into the room       → @security
+🛡  security       risk sign-off: LOW (rollback removes root cause)      → @commander
+⏸  commander      approval request (citing @security sign-off)          → @human
+🧑 human          approve @commander                                    → @commander
+⚡ commander      executed · MTTR 89s · ~$38k averted                   → postmortem
+```
+
+**Dynamic recruitment (Originality):** `@security` is **not** a participant of the
+chat. When the validated fix is irreversible, the commander **discovers and pulls
+it in mid-incident** through Band's real participant tools — `tools.lookup_peers()`
+(find addable peers, server-filtered to those not in the room) then
+`tools.add_participant(<security id>)`. The band-sdk runtime delivers a `room_added`
+event to the security agent, which subscribes, runs a deterministic risk check, and
+posts its sign-off `@commander` — a new collaborator joining a live incident, which
+a fixed pipeline can't do. Register it via `BAND_SECURITY_ID`/`BAND_SECURITY_KEY`.
+
+Every decision is **real, not faked**: each agent reuses the backend roster
+(`backend/agents/roster.py`) for its content/cost, and the validator runs
+`backend/mockservice.simulate_remediation` (the same chaos replay the offline
+cascade uses) — deterministic, **no LLM required**. The band-sdk runtime handles
+subscription, per-agent `/next` message routing, and skipping each agent's own
+messages (no self-loop). The **human approve** is a genuine gate: set
+`BAND_HUMAN_KEY` to auto-post it as the human, or a real person types
+`approve @commander` in the chat. The offline/orchestrator/`BandBus` paths are
+untouched and remain the reliable fallback.
+
+```
+band_live/protocol.py  structured @mention marker (intent + accumulating ctx) + env
+band_live/reactive.py  ReactiveAgent base (band.Agent + dispatch SimpleAdapter)
+band_live/cascade.py   the 6 deterministic handlers + dynamic @security recruitment
+band_live/runner.py    launch all 5, seed the trigger, drive approve, show transcript
+```
+
 ## Going live (point it at your own Band + providers)
 
 The offline run needs zero keys. To run the **same code** live, copy
@@ -195,8 +279,9 @@ The offline run needs zero keys. To run the **same code** live, copy
 1. **Band** (already implemented) — register 5 remote agents, add all 5 to ONE
    shared chat, set each `BAND_<AGENT>_ID`/`_KEY` + `BAND_CHAT_ID`, then `BUS=band`.
    `BandBus.post`/`history` drive and read back the cascade in a real Band room
-   (the Phoenix-Channels inbound `subscribe` path is stubbed — not needed, since
-   the orchestrator drives the room deterministically).
+   (BandBus's own inbound `subscribe` is stubbed — the orchestrator drives the room
+   deterministically; the genuine Phoenix-Channels *receive* path is exercised by
+   the live agents in [`band_live`](#live-agents-on-band--band_live-the-strongest-band-is-the-coordination-layer-proof)).
 2. **Featherless / AI/ML API** — paste keys, confirm each `BASE_URL`/`MODEL`
    against the provider setup guide, set `LLM_MODE=aiml`. OfflineLLM phrasing is
    replaced by real model output; the logic is unchanged.
