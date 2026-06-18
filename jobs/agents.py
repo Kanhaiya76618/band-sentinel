@@ -166,30 +166,45 @@ class Tailor(JobAgent):
         jd = f"{match.title} {match.description}".lower()
         posting_kw = sorted({s for s in SKILL_VOCAB if re.search(r"\b" + re.escape(s) + r"\b", jd)})
         have = {s.lower() for s in prof.skills}
-        added = [k for k in posting_kw if k not in have]
+        # NO FABRICATION: only the candidate's REAL skills are emphasized. Posting
+        # keywords they don't have are surfaced as gaps — never written into the resume.
+        overlap = [k for k in posting_kw if k in have]
+        gaps = [k for k in posting_kw if k not in have]
 
-        md = self._render_markdown(prof, match, posting_kw, added)
+        md = self._render_markdown(prof, match, overlap)
         base = ARTIFACTS / run_id
         files = _write_resume_files(base, f"resume_{match.id or 'role'}", md)
 
-        tr = TailorResult(match_id=match.id, tailored=True, keywords_added=added,
-                          markdown=md, files=files,
-                          note=f"Aligned to '{match.title}' @ {match.company}; "
-                               f"emphasized {len(posting_kw)} posting keywords.")
-        line = (f"Tailored your resume to {match.title} @ {match.company} — "
-                f"added {len(added)} keyword(s); md/PDF/DOCX ready. @applier.")
+        note = (f"Aligned to '{match.title}' @ {match.company} by reordering and re-emphasizing "
+                f"{len(overlap)} real overlapping skill(s) — nothing invented.")
+        if gaps:
+            note += (f" Gaps to consider (the posting wants these but they're NOT on your resume; "
+                     f"add only if you genuinely have them): {', '.join(gaps[:10])}.")
+        tr = TailorResult(match_id=match.id, tailored=True, keywords_added=overlap, gaps=gaps,
+                          markdown=md, files=files, note=note)
+        line = (f"Tailored your resume to {match.title} @ {match.company} — re-emphasized "
+                f"{len(overlap)} real skill(s), flagged {len(gaps)} gap(s) (none fabricated). "
+                "md/PDF/DOCX ready. @applier.")
         return RoomMessage.of(self.id, Intent.TAILOR_RESULT, self._voice("tailor", line),
                               mentions=["@applier"], payload_model=tr)
 
-    def _render_markdown(self, prof, match, posting_kw, added) -> str:
-        skills = sorted(set([s.lower() for s in prof.skills] + posting_kw))
+    def _render_markdown(self, prof, match, overlap) -> str:
+        # The resume reflects ONLY the candidate's real skills (reordered to put the
+        # posting-relevant ones first). Gaps are never written into the document.
+        real = [s.lower() for s in prof.skills]
+        skills = list(dict.fromkeys(overlap + sorted(real)))  # relevant-first, no invented entries
         summary = (prof.summary or "Experienced professional.").strip()
+        emph = ", ".join(overlap[:6]) or "the relevant requirements"
         tailored_summary = (
-            f"{summary} Targeting **{match.title}** at **{match.company}**, with strength in "
-            f"{', '.join(posting_kw[:6]) or 'the listed requirements'}."
+            f"{summary} Targeting **{match.title}** at **{match.company}**, emphasizing existing "
+            f"strength in {emph}."
         )
         live = "" if _offline() else self.llm.complete(
-            system="Rewrite this resume summary to match a job posting. 2 sentences max.",
+            system=("Rewrite this resume summary to fit a job posting. HARD RULE — NO FABRICATION: "
+                    "use ONLY facts already in the candidate summary. Never invent skills, "
+                    "employers, job titles, dates, degrees, certifications, or metrics. You may "
+                    "reorder, re-emphasize, and rephrase the candidate's real experience only. "
+                    "2 sentences max."),
             user=f"Posting: {match.title} at {match.company}. {match.description[:600]}\n\n"
                  f"Candidate summary: {summary}", role="@tailor", tag="rewrite",
         )
@@ -264,7 +279,8 @@ class Applier(JobAgent):
             f"contribute to your team.\n\nBest regards,\nThe candidate"
         )
         live = "" if _offline() else self.llm.complete(
-            system="Write a concise 4-sentence cover letter. Professional, specific.",
+            system="Write a concise 4-sentence cover letter. Professional, specific. Use ONLY the "
+                   "candidate's stated skills — do not invent experience, employers, or metrics.",
             user=f"Role: {match.title} at {match.company}. Candidate skills: {top}. "
                  f"Posting: {match.description[:400]}", role="@applier", tag="cover",
         )

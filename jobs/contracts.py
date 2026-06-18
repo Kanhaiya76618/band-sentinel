@@ -62,7 +62,8 @@ class TailorResult(BaseModel):
     """The tailored resume @tailor produced for a chosen posting."""
     match_id: str
     tailored: bool                        # False if the user declined
-    keywords_added: list[str] = Field(default_factory=list)
+    keywords_added: list[str] = Field(default_factory=list)  # REAL overlapping skills emphasized
+    gaps: list[str] = Field(default_factory=list)            # posting wants these; NOT on the resume
     markdown: Optional[str] = None
     files: dict[str, str] = Field(default_factory=dict)  # ext -> path under data/
     note: Optional[str] = None
