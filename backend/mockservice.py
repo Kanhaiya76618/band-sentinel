@@ -39,6 +39,7 @@ class Scenario:
     bad_deploy_active: bool = True
     normal_p99_ms: float = 220.0
     timeline: list[dict] = field(default_factory=list)
+    incident_id: str = "INC-2041"
 
 
 # --------------------------------------------------------------------------- #

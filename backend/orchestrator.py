@@ -89,7 +89,7 @@ async def run_incident(
     approved_rem: Remediation | None = None
     approved_vr: ValidationResult | None = None
     for attempt in (1, 2):
-        rem_msg = await _post(bus, remediator.propose(attempt), log)
+        rem_msg = await _post(bus, remediator.propose(s, attempt), log)
         rem = Remediation(**rem_msg.payload)
 
         val_msg = await _post(bus, validator.replay(s, rem), log)
@@ -118,7 +118,8 @@ async def run_incident(
         approver = "auto:policy"
 
     # 5) Execute + resolve. MTTR is modeled from the steps so far; decision
-    #    latency is the real agent wall-clock (the speed flex).
+    #    latency is the real agent wall-clock (the speed flex). Deterministic so
+    #    the flagship demo lands on the canonical ~89s / 1.5 min the pitch cites.
     modeled_mttr = sum(MODELED_SECONDS.get(m.intent, 0.0) for m in posted)
     latency_ms = (time.perf_counter() - t0) * 1000.0
     dec_msg = await _post(

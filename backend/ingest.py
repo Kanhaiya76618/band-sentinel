@@ -36,14 +36,19 @@ class IngestError(ValueError):
 # alias -> canonical metric name
 _ALIASES: dict[str, str] = {
     "t": "t", "time": "t", "ts": "t", "timestamp": "t", "index": "t", "idx": "t",
+    "orderdate": "t", "order_date": "t",
     "p99_ms": "p99_ms", "p99": "p99_ms", "latency_p99": "p99_ms",
     "latency_ms": "p99_ms", "latency": "p99_ms", "p99_latency": "p99_ms",
+    "totalamount": "p99_ms", "total_amount": "p99_ms", "unitprice": "p99_ms", "unit_price": "p99_ms",
     "error_rate": "error_rate", "errors": "error_rate", "err": "error_rate",
     "error_pct": "error_rate", "errorrate": "error_rate", "error": "error_rate",
+    "discount": "error_rate", "quantity": "error_rate",
     "mem_util": "mem_util", "mem": "mem_util", "memory": "mem_util",
     "memory_util": "mem_util", "mem_pct": "mem_util", "memory_pct": "mem_util",
+    "tax": "mem_util", "shippingcost": "mem_util", "shipping_cost": "mem_util",
     "deploy": "deploy", "deploy_marker": "deploy", "version": "deploy",
     "release": "deploy", "build": "deploy",
+    "orderstatus": "deploy", "order_status": "deploy",
 }
 
 

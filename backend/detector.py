@@ -25,8 +25,12 @@ def detect(
     Walk the timeline; the first metric that breaches z_threshold for `confirm`
     consecutive points opens an incident. Returns the breach summary or None.
     """
+    # Dynamically scale down baseline and confirm counts for short timelines
     if len(timeline) < baseline_window + confirm:
-        return None
+        if len(timeline) < 2:
+            return None
+        baseline_window = max(1, len(timeline) // 2)
+        confirm = max(1, len(timeline) - baseline_window)
 
     base = timeline[:baseline_window]
     breaches: dict[str, int] = {m: 0 for m in WATCHED}

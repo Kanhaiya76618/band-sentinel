@@ -103,7 +103,7 @@ class Diagnostician(Agent):
 class Remediator(Agent):
     framework, provider = "LangGraph", "aiml"
 
-    def propose(self, attempt: int) -> RoomMessage:
+    def propose(self, s: Scenario, attempt: int) -> RoomMessage:
         if attempt == 1:
             rem = Remediation(
                 action="scale_pods", params={"pods": 12},
@@ -112,23 +112,23 @@ class Remediator(Agent):
             )
             text = self._voice(
                 "fix1",
-                "First pass: scale 6 -> 12 pods to absorb the load. "
+                f"First pass: scale {s.pods} -> {s.pods * 2} pods to absorb the load. "
                 "@validator, replay it before we touch prod.",
             )
         else:
             rem = Remediation(
                 action="rollback_and_failover",
-                params={"to_region": "us-west-2"},
+                params={"to_region": s.healthy_region},
                 rationale="Leak is in the deploy itself; remove it at source and shed load.",
                 reversible=False, attempt=2,
             )
             text = self._voice(
                 "fix2",
-                "Revised: roll back v2.3.1 AND fail traffic to us-west-2. "
-                "Kills the leak at source. @validator, re-run.",
+                f"Revised: roll back {s.deploy} AND fail traffic to {s.healthy_region}. "
+                f"Kills the leak at source. @validator, re-run.",
             )
         return RoomMessage.of(self.id, Intent.REMEDIATION, text,
-                              mentions=["@validator"], payload_model=rem)
+                               mentions=["@validator"], payload_model=rem)
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +201,7 @@ class Commander(Agent):
     def write_postmortem(self, s: Scenario, hyp: Hypothesis, dec: Decision,
                          timeline: list[str]) -> RoomMessage:
         pm = Postmortem(
-            incident_id="INC-2041",
+            incident_id=s.incident_id,
             title=f"{s.service} {s.region} — leak from {s.deploy}",
             severity=Severity.SEV1,
             timeline=timeline,
@@ -211,10 +211,10 @@ class Commander(Agent):
             cost_summary=f"Downtime ~${dec.downtime_cost_usd:,.0f}; "
                          f"remediation ${dec.remediation_cost_usd:,.0f}.",
             follow_ups=[
-                "Add a memory-leak canary to the deploy gate for checkout-api.",
+                f"Add a memory-leak canary to the deploy gate for {s.service}.",
                 "Block deploys that raise mem_util slope > 2x in canary.",
-                "Pre-warm us-west-2 standby to cut failover time.",
+                f"Pre-warm {s.healthy_region} standby to cut failover time.",
             ],
         )
-        text = self._voice("pm", "Postmortem INC-2041 drafted and filed.")
+        text = self._voice("pm", f"Postmortem {s.incident_id} drafted and filed.")
         return RoomMessage.of(self.id, Intent.POSTMORTEM, text, payload_model=pm)
