@@ -6,13 +6,32 @@
 const { useState, useEffect, useRef } = React;
 const html = htm.bind(React.createElement);
 
-// If the session expires (or we're not signed in), any API call returns 401 —
-// bounce to the landing/sign-in page. Wrap fetch once, globally.
+// API base URL — same-origin by default; set window.AEGIS_API_BASE (config.js) to
+// the Railway backend when the SPA is hosted separately (Vercel). No hardcoded host.
+const API_BASE = (window.AEGIS_API_BASE || "").replace(/\/$/, "");
+const _isApi = (u) => typeof u === "string" && (u.startsWith("/api") || u.startsWith("/stream"));
+
+// Wrap fetch once: prepend API_BASE for API calls, send cookies cross-origin, and
+// bounce to sign-in on 401 (expired/anonymous session).
 const _fetch = window.fetch.bind(window);
-window.fetch = async (...args) => {
-  const res = await _fetch(...args);
+window.fetch = async (url, opts) => {
+  if (_isApi(url) && API_BASE) {
+    url = API_BASE + url;
+    opts = Object.assign({ credentials: "include" }, opts);
+  }
+  const res = await _fetch(url, opts);
   if (res.status === 401) window.location = "/landing";
   return res;
+};
+
+// Wrap EventSource the same way so SSE streams hit the right origin with cookies.
+const _ES = window.EventSource;
+window.EventSource = function (url, opts) {
+  if (_isApi(url) && API_BASE) {
+    url = API_BASE + url;
+    opts = Object.assign({ withCredentials: true }, opts);
+  }
+  return new _ES(url, opts);
 };
 
 async function signOut() {
@@ -21,6 +40,7 @@ async function signOut() {
 }
 
 const LANES = {
+  "@security":      { var: "--validator",     label: "SECURITY" },
   "@observer":      { var: "--observer",      label: "OBSERVER" },
   "@diagnostician": { var: "--diagnostician", label: "DIAGNOSTICIAN" },
   "@remediator":    { var: "--remediator",    label: "REMEDIATOR" },
@@ -72,38 +92,27 @@ function useRoute() {
   return route;
 }
 
+const TerminalIcon = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ display: "block" }}><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>`;
+const SlidersIcon = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ display: "block" }}><line x1="4" y1="21" x2="4" y2="14"></line><line x1="4" y1="10" x2="4" y2="3"></line><line x1="12" y1="21" x2="12" y2="12"></line><line x1="12" y1="8" x2="12" y2="3"></line><line x1="20" y1="21" x2="20" y2="16"></line><line x1="20" y1="12" x2="20" y2="3"></line><line x1="1" y1="14" x2="7" y2="14"></line><line x1="9" y1="8" x2="15" y2="8"></line><line x1="17" y1="16" x2="23" y2="16"></line></svg>`;
+const ActivityIcon = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ display: "block" }}><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>`;
+const ClockIcon = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ display: "block" }}><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>`;
+const BarChartIcon = html`<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style=${{ display: "block" }}><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>`;
+
 function Sidebar({ route, me }) {
   const sections = [
     {
       title: "Platform",
       items: [
-        { id: "resolve", label: "Playground", ic: "🎮", path: "#resolve" },
-        { id: "integrations", label: "Models", ic: "🎛️", path: "#integrations" },
-        { id: "settings_docs", label: "Documentation", ic: "📖", path: "#settings" }
+        { id: "resolve", label: "Playground", ic: TerminalIcon, path: "#resolve" },
+        { id: "integrations", label: "Models", ic: SlidersIcon, path: "#integrations" }
       ]
     },
     {
-      title: "Loans",
+      title: "Jobs & Runs",
       items: [
-        { id: "jobs", label: "Active Loans", ic: "💼", path: "#jobs" },
-        { id: "jobs_req", label: "Loan Requests", ic: "📄", path: "#jobs" },
-        { id: "analytics", label: "Reports", ic: "📊", path: "#analytics" }
-      ]
-    },
-    {
-      title: "Insights",
-      items: [
-        { id: "analytics_insights", label: "Borrower Insights", ic: "👥", path: "#analytics" },
-        { id: "analytics_overview", label: "Investment Overview", ic: "📈", path: "#analytics" },
-        { id: "analytics_trends", label: "Trends", ic: "📉", path: "#analytics" }
-      ]
-    },
-    {
-      title: "",
-      items: [
-        { id: "history", label: "History", ic: "🕒", path: "#history" },
-        { id: "settings_star", label: "Starred", ic: "⭐", path: "#settings" },
-        { id: "settings", label: "Setting", ic: "⚙️", path: "#settings" }
+        { id: "jobs", label: "Active Jobs", ic: ActivityIcon, path: "#jobs" },
+        { id: "history", label: "Run History", ic: ClockIcon, path: "#history" },
+        { id: "analytics", label: "Reports", ic: BarChartIcon, path: "#analytics" }
       ]
     }
   ];
@@ -114,8 +123,8 @@ function Sidebar({ route, me }) {
 
   return html`<aside class="sidebar">
     <a href="#dashboard" class="brand">
-      <h1>Lendo Enterprise</h1>
-      <div class="sub">AEGIS MULTI-AGENT PLATFORM</div>
+      <h1>Aegis Console</h1>
+      <div class="sub">MULTI-AGENT SYSTEM</div>
     </a>
     
     ${sections.map((sec, sIdx) => html`
@@ -123,13 +132,7 @@ function Sidebar({ route, me }) {
         ${sec.title ? html`<div class="nav-section-title">${sec.title}</div>` : null}
         <nav class="nav">
           ${sec.items.map((item) => {
-            const isActive = route === item.id || 
-              (item.id === "analytics_insights" && route === "analytics") ||
-              (item.id === "analytics_overview" && route === "analytics") ||
-              (item.id === "analytics_trends" && route === "analytics") ||
-              (item.id === "settings_docs" && route === "settings") ||
-              (item.id === "settings_star" && route === "settings") ||
-              (item.id === "jobs_req" && route === "jobs");
+            const isActive = route === item.id;
             
             return html`<a 
               key=${item.id} 
@@ -169,7 +172,7 @@ function Dashboard() {
   const [err, setErr] = useState(null);
   const [timeframe, setTimeframe] = useState("monthly");
   const [hoveredBar, setHoveredBar] = useState(8); // Default pre-hover September to match screenshot
-  const [selectedLoans, setSelectedLoans] = useState({});
+  const [selectedRuns, setSelectedRuns] = useState({});
 
   useEffect(() => {
     let live = true;
@@ -184,34 +187,34 @@ function Dashboard() {
   if (!data) return html`<div class="empty">Loading…</div>`;
 
   const statCards = [
-    { k: "Total Loan Issued", v: "$3,250,000", sub: "Total amount lent to borrowers", trend: "+3.2%", up: true },
-    { k: "Approved Loans", v: "$2,780,000", sub: "Loans successfully funded", trend: "+3.2%", up: true },
-    { k: "Interest Earned", v: "$1,436,120", sub: "Total interest from repayments", trend: "+3.2%", up: true },
+    { k: "Total Incidents Averted", v: "$3,250,000", sub: "Estimated downtime costs saved", trend: "+12.4%", up: true },
+    { k: "Active Agent Jobs", v: "142", sub: "Currently running validation & triage", trend: "+8.2%", up: true },
+    { k: "System Health / SLO", v: "99.98%", sub: "Service level objective status", trend: "+0.02%", up: true },
   ];
 
   // Bar Chart Data (Jan - Dec)
   const barData = [
-    { m: "Jan", edu: 15, pers: 8 },
-    { m: "Feb", edu: 22, pers: 10 },
-    { m: "Mar", edu: 28, pers: 12 },
-    { m: "Apr", edu: 19, pers: 15 },
-    { m: "May", edu: 34, pers: 21 },
-    { m: "Jun", edu: 42, pers: 24 },
-    { m: "Jul", edu: 39, pers: 18 },
-    { m: "Aug", edu: 36, pers: 25 },
-    { m: "Sep", edu: 42, pers: 20, active: true }, // Highlighted Month
-    { m: "Oct", edu: 25, pers: 12 },
-    { m: "Nov", edu: 30, pers: 16 },
-    { m: "Dec", edu: 48, pers: 26 },
+    { m: "Jan", incident: 15, job: 8 },
+    { m: "Feb", incident: 22, job: 10 },
+    { m: "Mar", incident: 28, job: 12 },
+    { m: "Apr", incident: 19, job: 15 },
+    { m: "May", incident: 34, job: 21 },
+    { m: "Jun", incident: 42, job: 24 },
+    { m: "Jul", incident: 39, job: 18 },
+    { m: "Aug", incident: 36, job: 25 },
+    { m: "Sep", incident: 42, job: 20, active: true }, // Highlighted Month
+    { m: "Oct", incident: 25, job: 12 },
+    { m: "Nov", incident: 30, job: 16 },
+    { m: "Dec", incident: 48, job: 26 },
   ];
 
-  // Loans list rows - match image with fallback to API data
-  const baseLoans = [
-    { id: "l1", name: "Personal Loan", time: "16 Mar 2024, 9:30 am", amount: "$4,200", status: "Applied" },
-    { id: "l2", name: "Mortgage Loan", time: "16 Mar 2024, 9:30 am", amount: "$4,200", status: "Rejected" },
-    { id: "l3", name: "Business Loan", time: "16 Mar 2024, 9:30 am", amount: "$4,200", status: "Applied" },
-    { id: "l4", name: "Business Loan", time: "16 Mar 2024, 9:30 am", amount: "$4,200", status: "Applied" },
-    { id: "l5", name: "Student Loan", time: "16 Mar 2024, 9:30 am", amount: "$4,200", status: "Applied" },
+  // base runs list rows
+  const baseRuns = [
+    { id: "r1", runId: "checkout-api-db-saturation", time: "18 Jun 2026, 2:15 pm", duration: "1m 45s", status: "Resolved" },
+    { id: "r2", runId: "auth-service-latency-spike", time: "18 Jun 2026, 1:40 pm", duration: "45s", status: "Escalated" },
+    { id: "r3", runId: "tailor-resume-ml-engineer", time: "18 Jun 2026, 11:20 am", duration: "12s", status: "Resolved" },
+    { id: "r4", runId: "payment-gateway-timeout", time: "18 Jun 2026, 9:05 am", duration: "2m 10s", status: "Resolved" },
+    { id: "r5", runId: "search-jobs-by-field", time: "18 Jun 2026, 8:30 am", duration: "8s", status: "Resolved" },
   ];
 
   // Map API activity into rows if available to keep it connected
@@ -219,38 +222,37 @@ function Dashboard() {
     const isIncident = a.kind === "incident";
     return {
       id: "dyn-" + i,
-      name: a.title,
+      runId: a.title,
       time: timeAgo(a.created_at),
-      amount: isIncident ? "$12,500" : "$450",
-      status: a.status === "resolved" || a.status === "submitted" || a.status === "applied" ? "Applied" : "Rejected"
+      duration: isIncident ? "2m 15s" : "12s",
+      status: a.status === "resolved" || a.status === "submitted" || a.status === "applied" ? "Resolved" : "Escalated"
     };
   });
 
-  const allLoans = [...dynamicRows, ...baseLoans].slice(0, 5);
+  const allRuns = [...dynamicRows, ...baseRuns].slice(0, 5);
 
   const toggleSelect = (id) => {
-    setSelectedLoans(prev => ({ ...prev, [id]: !prev[id] }));
+    setSelectedRuns(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
   const toggleSelectAll = (e) => {
     const checked = e.target.checked;
     const newSelects = {};
     if (checked) {
-      allLoans.forEach(l => { newSelects[l.id] = true; });
+      allRuns.forEach(r => { newSelects[r.id] = true; });
     }
-    setSelectedLoans(newSelects);
+    setSelectedRuns(newSelects);
   };
 
-  const isAllSelected = allLoans.length > 0 && allLoans.every(l => selectedLoans[l.id]);
+  const isAllSelected = allRuns.length > 0 && allRuns.every(r => selectedRuns[r.id]);
 
   // Donut chart segments calculation
-  // Total Circumference = 2 * Math.PI * 40 = 251.32
   const circ = 251.32;
   const donutSegments = [
-    { label: "On Time", pct: 40, color: "#4f46e5", len: circ * 0.40, offset: 0 },
-    { label: "Delayed", pct: 25, color: "#f59e0b", len: circ * 0.25, offset: -circ * 0.40 },
-    { label: "Defaulted", pct: 20, color: "#ef4444", len: circ * 0.20, offset: -circ * 0.65 },
-    { label: "Paid Off", pct: 15, color: "#10b981", len: circ * 0.15, offset: -circ * 0.85 }
+    { label: "Observer", pct: 40, color: "var(--observer)", len: circ * 0.40, offset: 0 },
+    { label: "Diagnostician", pct: 25, color: "var(--diagnostician)", len: circ * 0.25, offset: -circ * 0.40 },
+    { label: "Remediator", pct: 20, color: "var(--remediator)", len: circ * 0.20, offset: -circ * 0.65 },
+    { label: "Validator", pct: 15, color: "var(--validator)", len: circ * 0.15, offset: -circ * 0.85 }
   ];
 
   return html`<div>
@@ -274,12 +276,12 @@ function Dashboard() {
     </div>
 
     <div class="two-col">
-      <!-- Left Column: Activity Chart & Loans List -->
+      <!-- Left Column: Activity Chart & Active Systems & Runs -->
       <div style=${{ display: "flex", flexDirection: "column", gap: "20px" }}>
-        <!-- My Activity Chart -->
+        <!-- Agent Coordination Activity Chart -->
         <div class="block" style=${{ position: "relative" }}>
           <h3>
-            <span>My Activity</span>
+            <span>Agent Coordination Activity</span>
             <div class="resolve-modes" style=${{ margin: 0 }}>
               <button class=${"tab" + (timeframe === "monthly" ? " on" : "")} style=${{ padding: "4px 10px", fontSize: "11.5px", borderRadius: "6px" }} onClick=${() => setTimeframe("monthly")}>Monthly</button>
               <button class=${"tab" + (timeframe === "quarterly" ? " on" : "")} style=${{ padding: "4px 10px", fontSize: "11.5px", borderRadius: "6px" }} onClick=${() => setTimeframe("quarterly")}>Quarterly</button>
@@ -297,18 +299,18 @@ function Dashboard() {
               <line x1="40" y1="200" x2="520" y2="200" stroke="rgba(0,0,0,0.08)" stroke-width="1" />
               
               <!-- Y-Axis Labels -->
-              <text x="30" y="44" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">$400,000</text>
-              <text x="30" y="84" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">$320,000</text>
-              <text x="30" y="124" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">$240,000</text>
-              <text x="30" y="164" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">$120,000</text>
-              <text x="30" y="204" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">$0</text>
+              <text x="30" y="44" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">80</text>
+              <text x="30" y="84" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">60</text>
+              <text x="30" y="124" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">40</text>
+              <text x="30" y="164" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">20</text>
+              <text x="30" y="204" text-anchor="end" fill="var(--muted)" font-size="10" font-weight="600">0</text>
               
               <!-- Bars -->
               ${barData.map((b, idx) => {
                 const totalH = 160; // Max height in px
-                const maxVal = 76;  // Represents the max possible val (edu + pers max)
-                const eduH = (b.edu / maxVal) * totalH;
-                const persH = (b.pers / maxVal) * totalH;
+                const maxVal = 76;  // Represents the max possible val (incident + job max)
+                const incidentH = (b.incident / maxVal) * totalH;
+                const jobH = (b.job / maxVal) * totalH;
                 
                 const colW = 16;
                 const gap = (480) / 12;
@@ -317,29 +319,29 @@ function Dashboard() {
                 const isSep = b.active;
                 
                 // Colors: highlighted is colored, others are muted pastel
-                const eduColor = isSep || isHovered ? "#4f46e5" : "rgba(79, 70, 229, 0.15)";
-                const persColor = isSep || isHovered ? "#fbbf24" : "rgba(251, 191, 36, 0.15)";
+                const incidentColor = isSep || isHovered ? "#4f46e5" : "rgba(79, 70, 229, 0.15)";
+                const jobColor = isSep || isHovered ? "#fbbf24" : "rgba(251, 191, 36, 0.15)";
                 
                 return html`<g key=${idx} style=${{ cursor: "pointer" }} onMouseEnter=${() => setHoveredBar(idx)}>
                   <!-- Background thin full-height hover target -->
                   <rect x=${x - 8} y="20" width=${colW + 16} height="190" fill="transparent" />
                   
-                  <!-- Stacked Bar (Education - bottom) -->
+                  <!-- Stacked Bar (Incidents - bottom) -->
                   <rect 
                     x=${x} 
-                    y=${200 - eduH} 
+                    y=${200 - incidentH} 
                     width=${colW} 
-                    height=${eduH} 
-                    fill=${eduColor} 
+                    height=${incidentH} 
+                    fill=${incidentColor} 
                     rx="3"
                   />
-                  <!-- Stacked Bar (Personal - top) -->
+                  <!-- Stacked Bar (Jobs - top) -->
                   <rect 
                     x=${x} 
-                    y=${200 - eduH - persH} 
+                    y=${200 - incidentH - jobH} 
                     width=${colW} 
-                    height=${persH} 
-                    fill=${persColor} 
+                    height=${jobH} 
+                    fill=${jobColor} 
                     rx="3"
                   />
                   
@@ -362,24 +364,24 @@ function Dashboard() {
               const xPos = 50 + hoveredBar * gap + 8;
               const b = barData[hoveredBar];
               return html`<div class="chart-tooltip" style=${{ left: `calc(${xPos / 5.4}% - 48px)`, top: "35px" }}>
-                <div class="chart-tooltip-title">${b.m} 2025</div>
+                <div class="chart-tooltip-title">${b.m} 2026</div>
                 <div class="chart-tooltip-row">
-                  <span>● Education</span>
-                  <span class="chart-tooltip-val">$${(b.edu * 1000).toLocaleString()}</span>
+                  <span>● Incidents Averted</span>
+                  <span class="chart-tooltip-val">${b.incident}</span>
                 </div>
                 <div class="chart-tooltip-row">
-                  <span style=${{ color: "#fbbf24" }}>● Personal Loan</span>
-                  <span class="chart-tooltip-val">$${(b.pers * 1000).toLocaleString()}</span>
+                  <span style=${{ color: "#fbbf24" }}>● Agent Jobs</span>
+                  <span class="chart-tooltip-val">${b.job}</span>
                 </div>
               </div>`;
             })() : null}
           </div>
         </div>
 
-        <!-- Loans List Table -->
+        <!-- Active Systems & Runs Table -->
         <div class="block">
           <h3>
-            <span>Loans List</span>
+            <span>Active Systems & Runs</span>
             <div style=${{ display: "flex", gap: "8px" }}>
               <button class="ghost" style=${{ padding: "6px 12px", fontSize: "12px", borderRadius: "8px", display: "flex", alignItems: "center", gap: "4px" }}>
                 <span>⇅</span> Sort
@@ -397,22 +399,22 @@ function Dashboard() {
                   <th style=${{ width: "40px", textAlign: "center" }}>
                     <input type="checkbox" checked=${isAllSelected} onChange=${toggleSelectAll} style=${{ cursor: "pointer", width: "16px", height: "16px", accentColor: "var(--accent-brand)" }} />
                   </th>
-                  <th>Name</th>
-                  <th>Time</th>
-                  <th>Amount</th>
+                  <th>Run ID</th>
+                  <th>Trigger Time</th>
+                  <th>Duration</th>
                   <th>Status</th>
                 </tr>
               </thead>
               <tbody>
-                ${allLoans.map((l) => html`<tr key=${l.id} class="table-row">
+                ${allRuns.map((r) => html`<tr key=${r.id} class="table-row">
                   <td class="checkbox-cell">
-                    <input type="checkbox" checked=${!!selectedLoans[l.id]} onChange=${() => toggleSelect(l.id)} />
+                    <input type="checkbox" checked=${!!selectedRuns[r.id]} onChange=${() => toggleSelect(r.id)} />
                   </td>
-                  <td style=${{ fontWeight: "700" }}>${l.name}</td>
-                  <td style=${{ color: "var(--muted)", fontSize: "12.5px" }}>${l.time}</td>
-                  <td style=${{ fontWeight: "700" }}>${l.amount}</td>
+                  <td style=${{ fontWeight: "700" }}>${r.runId}</td>
+                  <td style=${{ color: "var(--muted)", fontSize: "12.5px" }}>${r.time}</td>
+                  <td style=${{ fontWeight: "700" }}>${r.duration}</td>
                   <td>
-                    <span class=${"chip " + l.status.toLowerCase()}>${l.status}</span>
+                    <span class=${"chip " + r.status.toLowerCase()}>${r.status}</span>
                   </td>
                 </tr>`)}
               </tbody>
@@ -421,12 +423,12 @@ function Dashboard() {
         </div>
       </div>
 
-      <!-- Right Column: Borrower Insights, Investment, Recent Transactions -->
+      <!-- Right Column: Agent Breakdown, Latency, Recent Agent Events -->
       <div style=${{ display: "flex", flexDirection: "column", gap: "20px" }}>
-        <!-- Borrower Insights Donut Chart -->
+        <!-- Agent Resolution Breakdown Donut Chart -->
         <div class="block">
           <h3>
-            <span>Borrower Insights</span>
+            <span>Agent Resolution Breakdown</span>
             <select style=${{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", background: "rgba(255,255,255,0.8)" }}>
               <option>Weekly</option>
               <option>Monthly</option>
@@ -454,8 +456,8 @@ function Dashboard() {
               </svg>
               <!-- Center Text -->
               <div style=${{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
-                <span style=${{ fontSize: "9px", color: "var(--muted)", fontWeight: "600", textTransform: "uppercase" }}>Total Loan</span>
-                <span style=${{ fontSize: "13px", fontWeight: "800", color: "var(--txt)", marginTop: "2px" }}>$120,000</span>
+                <span style=${{ fontSize: "9px", color: "var(--muted)", fontWeight: "600", textTransform: "uppercase" }}>Total Runs</span>
+                <span style=${{ fontSize: "13px", fontWeight: "800", color: "var(--txt)", marginTop: "2px" }}>1,240</span>
               </div>
             </div>
             
@@ -472,10 +474,10 @@ function Dashboard() {
           </div>
         </div>
 
-        <!-- Investment Overview Line Chart -->
+        <!-- System Latency & Load Line Chart -->
         <div class="block">
           <h3>
-            <span>Investment Overview</span>
+            <span>System Latency & Load</span>
             <select style=${{ padding: "4px 8px", fontSize: "11px", borderRadius: "6px", background: "rgba(255,255,255,0.8)" }}>
               <option>Weekly</option>
               <option>Monthly</option>
@@ -484,10 +486,10 @@ function Dashboard() {
           
           <div style=${{ display: "flex", gap: "12px", fontSize: "11px", color: "var(--muted)", fontWeight: "700", margin: "4px 0 12px", justifyContent: "flex-end" }}>
             <div style=${{ display: "flex", alignItems: "center", gap: "4px" }}>
-              <span style=${{ width: "8px", height: "8px", borderRadius: "50%", background: "#10b981" }}></span> Active Loans
+              <span style=${{ width: "8px", height: "8px", borderRadius: "50%", background: "#10b981" }}></span> System Load
             </div>
             <div style=${{ display: "flex", alignItems: "center", gap: "4px" }}>
-              <span style=${{ width: "8px", height: "8px", borderRadius: "50%", background: "#4f46e5" }}></span> Total Invested
+              <span style=${{ width: "8px", height: "8px", borderRadius: "50%", background: "#4f46e5" }}></span> P99 Latency (ms)
             </div>
           </div>
           
@@ -517,46 +519,46 @@ function Dashboard() {
               <path d="M 0,75 Q 40,65 80,62 T 160,40 T 240,45 T 280,35" fill="none" stroke="#4f46e5" stroke-width="2" stroke-linecap="round" />
             </svg>
             <div style=${{ display: "flex", justifyContent: "space-between", fontSize: "9.5px", color: "var(--muted)", fontWeight: "600", marginTop: "4px" }}>
-              <span>Oct, 2024</span>
-              <span>Feb, 2025</span>
+              <span>Oct, 2025</span>
+              <span>Feb, 2026</span>
             </div>
           </div>
         </div>
 
-        <!-- Recent Transactions -->
+        <!-- Recent Agent Events -->
         <div class="block">
-          <h3>Recent Transactions</h3>
+          <h3>Recent Agent Events</h3>
           <div class="tx-list">
             <div class="tx-item">
-              <div class="tx-icon" style=${{ color: "var(--accent-brand)", background: "rgba(79, 70, 229, 0.08)" }}>💼</div>
+              <div class="tx-icon" style=${{ color: "var(--accent-brand)", background: "rgba(79, 70, 229, 0.08)" }}>⚡</div>
               <div class="tx-details">
-                <div class="tx-title">Business Loan</div>
-                <div class="tx-desc">Loan issued</div>
+                <div class="tx-title">Incident Auto-Resolved</div>
+                <div class="tx-desc">checkout-api db pool saturation fixed</div>
               </div>
-              <div class="tx-amount" style=${{ color: "#0f172a" }}>$1,800</div>
+              <div class="tx-amount" style=${{ color: "#0f172a" }}>-24m MTTR</div>
             </div>
             
             <div class="tx-item">
-              <div class="tx-icon" style=${{ color: "#fbbf24", background: "rgba(251, 191, 36, 0.08)" }}>⚡</div>
+              <div class="tx-icon" style=${{ color: "#fbbf24", background: "rgba(251, 191, 36, 0.08)" }}>✦</div>
               <div class="tx-details">
-                <div class="tx-title">Startup Loan</div>
-                <div class="tx-desc">Partial repayment received</div>
+                <div class="tx-title">Active Job Completed</div>
+                <div class="tx-desc">Resume tailored for SRE Role</div>
               </div>
-              <div class="tx-amount" style=${{ color: "#0f172a" }}>$2,300</div>
+              <div class="tx-amount" style=${{ color: "#0f172a" }}>#8942</div>
             </div>
             
             <div class="tx-item">
-              <div class="tx-icon" style=${{ color: "#10b981", background: "rgba(16, 185, 129, 0.08)" }}>📄</div>
+              <div class="tx-icon" style=${{ color: "#10b981", background: "rgba(16, 185, 129, 0.08)" }}>🔍</div>
               <div class="tx-details">
-                <div class="tx-title">Personal Loan</div>
-                <div class="tx-desc">Loan request accepted</div>
+                <div class="tx-title">Telemetry Anomaly</div>
+                <div class="tx-desc">checkout-api p99 latency threshold crossed</div>
               </div>
-              <div class="tx-amount" style=${{ color: "#0f172a" }}>$500</div>
+              <div class="tx-amount" style=${{ color: "#0f172a" }}>Sev-2</div>
             </div>
           </div>
           
           <button class="btn-all-tx" onClick=${() => (window.location.hash = "#history")}>
-            <span>All Transactions</span> ➔
+            <span>All Events</span> ➔
           </button>
         </div>
       </div>
@@ -988,11 +990,11 @@ function Jobs() {
 
   return html`<div>
     <div class="resolve-modes">
-      ${[["company", "By company"], ["field", "By field"], ["resume", "By resume"], ["rebuild", "Rebuild → email"]].map(([k, l]) =>
+      ${[["company", "By company"], ["field", "By field"], ["resume", "By resume"], ["analyze", "Resume fit"]].map(([k, l]) =>
         html`<button key=${k} class=${"tab" + (mode === k ? " on" : "")} disabled=${running} onClick=${() => setMode(k)}>${l}</button>`)}
     </div>
 
-    ${mode === "rebuild" ? html`<${ResumeRebuilder} />` : html`<div>
+    ${mode === "analyze" ? html`<${ResumeSuggestions} />` : html`<div>
     <div class="block resolve-input">
       ${mode === "company" ? html`<div class="fields">
         <label>Company <input value=${company} placeholder="e.g. Stripe" onInput=${(e) => setCompany(e.target.value)} /></label>
@@ -1047,19 +1049,22 @@ function Jobs() {
   </div>`;
 }
 
-// Rebuild the user's resume for a target company/role and EMAIL it to them.
-// No fabrication: the tailor re-emphasizes REAL experience and flags gaps.
-function ResumeRebuilder() {
+// READ-ONLY resume fit analysis for a selected job. Reads the resume + job and
+// returns improvement SUGGESTIONS — it NEVER rewrites/stores/emails a modified
+// resume and never fabricates. Optional: email the suggestions summary (no file).
+function ResumeSuggestions() {
   const [me, setMe] = useState(null);
   const [resumeB64, setResumeB64] = useState("");
   const [resumeName, setResumeName] = useState("");
   const [company, setCompany] = useState("");
-  const [role, setRole] = useState("");
+  const [title, setTitle] = useState("");
   const [jd, setJd] = useState("");
   const [recipient, setRecipient] = useState("");
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState(null);
   const [err, setErr] = useState("");
+  const [emailing, setEmailing] = useState(false);
+  const [emailStatus, setEmailStatus] = useState(null);
 
   useEffect(() => {
     fetch("/api/auth/me").then((r) => (r.ok ? r.json() : null)).then((d) => {
@@ -1076,34 +1081,54 @@ function ResumeRebuilder() {
     r.readAsDataURL(f);
   }
 
-  async function rebuild() {
-    setErr(""); setRes(null);
-    if (!company.trim()) { setErr("Enter a target company."); return; }
+  async function analyze() {
+    setErr(""); setRes(null); setEmailStatus(null);
+    if (!company.trim() && !title.trim()) { setErr("Enter the job's company or title."); return; }
     if (!resumeB64 && !(me && me.has_resume)) { setErr("Upload a resume — none on file yet."); return; }
     setBusy(true);
-    const payload = { company: company.trim(), role: role.trim(), job_description: jd.trim(), recipient: recipient.trim() };
+    const payload = { company: company.trim(), title: title.trim(), job_description: jd.trim() };
     if (resumeB64) { payload.resume_b64 = resumeB64; payload.resume_name = resumeName; }
     try {
-      const r = await fetch("/api/jobs/rebuild-resume", {
+      const r = await fetch("/api/jobs/analyze", {
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
       });
       const d = await r.json();
-      if (!r.ok) setErr(d.error || "Rebuild failed");
+      if (!r.ok) setErr(d.error || "Analysis failed");
       else { setRes(d); setMe((m) => (m ? { ...m, has_resume: true } : m)); }
     } catch (e) { setErr(String(e)); }
     setBusy(false);
   }
 
+  async function emailSummary() {
+    if (!res) return;
+    setEmailing(true); setEmailStatus(null);
+    try {
+      const r = await fetch("/api/jobs/analyze/email", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job: res.job, analysis: res.analysis, recipient: recipient.trim() }),
+      });
+      setEmailStatus(await r.json());
+    } catch (e) { setEmailStatus({ status: "error", detail: String(e) }); }
+    setEmailing(false);
+  }
+
+  const a = res && res.analysis;
+  const Sec = (heading, items, color) => html`<div class="block" style=${{ marginTop: "12px", ...(color ? { borderColor: color } : {}) }}>
+    <h3 style=${color ? { color } : null}>${heading}</h3>
+    ${(items && items.length)
+      ? html`<ul style=${{ margin: "6px 0 0", paddingLeft: "18px" }}>${items.map((x, i) => html`<li key=${i} class="muted" style=${{ margin: "4px 0" }}>${x}</li>`)}</ul>`
+      : html`<p class="muted">—</p>`}
+  </div>`;
   const emailLine = (e) => ({
-    sent: ["pass", `✓ Emailed to ${res.recipient} via ${e.provider}${(e.attached || []).length ? " — " + e.attached.join(", ") : ""}`],
-    not_configured: ["warn", "✉ Email not configured (RESEND/SMTP empty) — download your resume below instead."],
+    sent: ["pass", `✓ Suggestions summary emailed to ${recipient} via ${e.provider}`],
+    not_configured: ["warn", "✉ Email not configured (RESEND/SMTP empty) — suggestions are shown above."],
     recipient_not_allowed: ["warn", `✉ ${e.detail}`],
     error: ["warn", `✉ Send failed — ${e.detail}`],
   }[e.status] || ["", ""]);
 
   return html`<div>
     <div class="block resolve-input">
-      <div class="muted note">Tailor your resume to a company and email it to yourself (${me ? me.email : "your account"}). The tailor agent re-emphasizes your <b>real</b> experience — it never invents skills.</div>
+      <div class="muted note"><b>Read-only.</b> The analysis agent reads your resume + the selected job and returns suggestions <b>you</b> act on — it never edits, stores, or emails a rewritten resume, and never invents experience.</div>
       <div>
         <label class="filebtn">${me && me.has_resume ? "Replace resume (optional)" : "Upload resume (PDF / DOCX)"}<input type="file" accept=".pdf,.docx,.txt" onChange=${onResume} /></label>
         ${resumeName ? html`<span class="muted"> ${resumeName}</span>`
@@ -1111,42 +1136,45 @@ function ResumeRebuilder() {
           : html`<span class="muted"> required the first time</span>`}
       </div>
       <div class="fields" style=${{ marginTop: "12px" }}>
-        <label>Target company <input value=${company} placeholder="e.g. Stripe" onInput=${(e) => setCompany(e.target.value)} /></label>
-        <label>Role (optional) <input value=${role} placeholder="e.g. Backend Engineer" onInput=${(e) => setRole(e.target.value)} /></label>
+        <label>Job title <input value=${title} placeholder="e.g. Backend Engineer" onInput=${(e) => setTitle(e.target.value)} /></label>
+        <label>Company <input value=${company} placeholder="e.g. Stripe" onInput=${(e) => setCompany(e.target.value)} /></label>
       </div>
       <div class="resolve-input" style=${{ marginTop: "12px" }}>
-        <label class="muted" style=${{ fontSize: "11px", letterSpacing: ".5px" }}>Job description / key requirements (optional — improves targeting & gap analysis)</label>
+        <label class="muted" style=${{ fontSize: "11px", letterSpacing: ".5px" }}>Job description / key requirements (improves gap + keyword analysis)</label>
         <textarea rows="4" style=${{ width: "100%", marginTop: "6px" }} value=${jd} placeholder="Paste the posting or key requirements…" onInput=${(e) => setJd(e.target.value)}></textarea>
-      </div>
-      <div class="fields" style=${{ marginTop: "12px" }}>
-        <label>Email to <input value=${recipient} onInput=${(e) => setRecipient(e.target.value)} /></label>
       </div>
     </div>
 
     <div class="section-head">
-      <div class="status"><span class=${"dot" + (busy ? " live" : "")}></span>${busy ? "tailoring…" : res ? "done" : "idle"}</div>
+      <div class="status"><span class=${"dot" + (busy ? " live" : "")}></span>${busy ? "analyzing…" : res ? "done" : "idle"}</div>
       <div class="spacer"></div>
-      <button class="run" onClick=${rebuild} disabled=${busy}>${busy ? "Rebuilding…" : "Rebuild & email"}</button>
+      <button class="run" onClick=${analyze} disabled=${busy}>${busy ? "Analyzing…" : "Analyze fit"}</button>
     </div>
 
     ${err ? html`<div class="empty" style=${{ borderColor: "var(--reject)", color: "var(--reject)" }}>${err}</div>` : null}
 
-    ${res ? html`<div>
+    ${a ? html`<div>
       <div class="verdict">
-        <div class="vhead">RESUME TAILORED — ${res.role || "role"} @ ${res.company}</div>
+        <div class="vhead">RESUME FIT — ${(res.job.title || "role")} @ ${(res.job.company || "—")}</div>
         <div class="grid">
-          <div class="cell"><div class="k">Emphasized (your real skills)</div><div class="v" style=${{ fontSize: "14px" }}>${(res.emphasized || []).join(", ") || "—"}</div></div>
-          <div class="cell"><div class="k">Downloads</div><div class="v dlrow" style=${{ fontSize: "12px" }}>
-            ${["pdf", "docx", "md"].filter((x) => res.files && res.files[x]).map((x) => html`<a key=${x} class="dlbtn" href=${dl(res.files[x])}>${x.toUpperCase()}</a>`)}
-          </div></div>
+          <div class="cell"><div class="k">Fit score</div><div class="v big" style=${{ color: "var(--pass)", fontWeight: 700 }}>${a.score}/100</div></div>
+          <div class="cell" style=${{ gridColumn: "span 2" }}><div class="k">Alignment</div><div class="v" style=${{ fontSize: "14px" }}>${a.alignment}</div></div>
+          <div class="cell"><div class="k">Resume file</div><div class="v good" style=${{ fontSize: "13px" }}>unchanged ✓</div></div>
         </div>
       </div>
-      ${(res.gaps || []).length ? html`<div class="block" style=${{ marginTop: "14px", borderColor: "#5a4a1f" }}>
-        <h3 style=${{ color: "var(--warn)" }}>Gaps to consider — NOT added to your resume</h3>
-        <p class="muted">The posting mentions these, but they weren't found on your resume. They were deliberately <b>not</b> written in — add them only if you genuinely have the experience:</p>
-        <div class="facts">${res.gaps.map((g) => html`<span key=${g} class="pill warn">${g}</span>`)}</div>
-      </div>` : null}
-      ${res.email ? html`<div class=${"emailbar " + emailLine(res.email)[0]} style=${{ marginTop: "12px" }}>${emailLine(res.email)[1]}</div>` : null}
+      ${Sec("Matched strengths", a.strengths)}
+      ${Sec("Gaps to consider — advice only, never added for you", a.gaps, "#5a4a1f")}
+      ${Sec("ATS / keyword suggestions (surface only if you truly have them)", a.ats_keywords)}
+      ${Sec("Clarity & impact tips", a.clarity_tips)}
+      ${Sec("Prioritized actions", a.actions)}
+      <div class="muted" style=${{ marginTop: "6px", fontSize: "11px" }}>Source: ${a.source === "llm" ? "LLM analysis" : "rule-based (no LLM key set)"}</div>
+
+      <div class="section-head" style=${{ marginTop: "14px" }}>
+        <label class="muted" style=${{ fontSize: "12px" }}>Email this summary (no attachment) to <input style=${{ marginLeft: "6px", minWidth: "200px" }} value=${recipient} onInput=${(e) => setRecipient(e.target.value)} /></label>
+        <div class="spacer"></div>
+        <button class="ghost" onClick=${emailSummary} disabled=${emailing || !recipient.trim()}>${emailing ? "Sending…" : "Email me the suggestions"}</button>
+      </div>
+      ${emailStatus ? html`<div class=${"emailbar " + emailLine(emailStatus)[0]}>${emailLine(emailStatus)[1]}</div>` : null}
     </div>` : null}
   </div>`;
 }
@@ -1472,7 +1500,7 @@ function App() {
   return html`<div class="app">
     <${Sidebar} route=${route} me=${me} />
     <main class="main">
-      <!-- Lendo Top Header Bar -->
+      <!-- Aegis Top Header Bar -->
       <div class="topbar">
         <div style=${{ display: "flex", flexDirection: "column" }}>
           <h2 style=${{ margin: 0, fontSize: "24px", fontWeight: "800", letterSpacing: "-0.5px" }}>${section.title}</h2>
@@ -1493,7 +1521,9 @@ function App() {
           </div>
         </div>
       </div>
-      <${Comp} />
+      <div class="page-transition-wrapper" key=${route}>
+        <${Comp} />
+      </div>
     </main>
   </div>`;
 }

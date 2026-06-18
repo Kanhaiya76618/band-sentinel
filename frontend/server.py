@@ -25,13 +25,18 @@ import asyncio
 import base64
 import json
 import os
+import time
 from pathlib import Path
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (
+    FileResponse, JSONResponse, RedirectResponse, StreamingResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
+from backend import auth
 from backend import email as emailer
 from backend import health, ingest, reporting, store
 from backend.bus import LocalBus
@@ -92,12 +97,26 @@ def _incident_approval_text(transcript: list[dict]) -> tuple[str, str]:
 STATIC = Path(__file__).parent / "static"
 
 app = FastAPI(title="Aegis Platform")
+
+# CORS for the split deploy (Vercel frontend -> Railway backend). Set
+# AEGIS_CORS_ORIGINS to a comma-separated list of allowed origins (the Vercel
+# URL); "*" by default for local/dev. Credentials need explicit origins, so when
+# "*" we disable credentials (the public demo needs no cookies).
+_CORS = [o.strip() for o in os.getenv("AEGIS_CORS_ORIGINS", "*").split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_CORS,
+    allow_credentials=_CORS != ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     store.init_db()
+    store.purge_expired_sessions()
     await channels.start_all(_channel_command)  # registers handler + starts listeners
 
 
@@ -106,16 +125,121 @@ def _sse(event: str, data: object) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Auth (Phase 7) — demo-grade: pbkdf2-hashed passwords, httpOnly session cookie.
+# A single middleware gates the whole app: public = landing, static, /api/auth/*,
+# and "/" (which itself redirects to the landing/sign-in when unauthenticated).
+# --------------------------------------------------------------------------- #
+# The incident DEMO (Simulate incident + its SSE) is PUBLIC so judges can watch
+# the war room without signing up; the personal workspace stays gated.
+_PUBLIC_EXACT = {"/landing", "/favicon.ico", "/", "/app"}
+_PUBLIC_PREFIX = ("/static/", "/api/auth/", "/api/simulate")
+
+
+def _uid(request: Request):
+    u = getattr(request.state, "user", None)
+    return u["id"] if u else None
+
+
+def _set_session_cookie(resp, token: str) -> None:
+    # httpOnly + expiry. (Secure omitted so it works over http://localhost; set it
+    # behind HTTPS in production.)
+    resp.set_cookie(auth.COOKIE_NAME, token, max_age=auth.SESSION_SECONDS,
+                    httponly=True, samesite="lax", path="/")
+
+
+@app.middleware("http")
+async def _auth_gate(request: Request, call_next):
+    token = request.cookies.get(auth.COOKIE_NAME)
+    request.state.user = store.get_session_user(token) if token else None
+    path = request.url.path
+    public = path in _PUBLIC_EXACT or any(path.startswith(p) for p in _PUBLIC_PREFIX)
+    if not public and not request.state.user:
+        if path.startswith("/api/") or path == "/stream":
+            return JSONResponse({"error": "Authentication required.", "auth": False}, status_code=401)
+        return RedirectResponse("/landing", status_code=302)
+    return await call_next(request)
+
+
+def _login_response(user_id: int, email: str) -> JSONResponse:
+    token = auth.new_session_token()
+    store.create_session(token, user_id, time.time() + auth.SESSION_SECONDS)
+    resp = JSONResponse({"ok": True, "email": email})
+    _set_session_cookie(resp, token)
+    return resp
+
+
+@app.post("/api/auth/signup")
+async def auth_signup(request: Request) -> JSONResponse:
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    if not auth.valid_email(email):
+        return JSONResponse({"error": "Enter a valid email address."}, status_code=400)
+    problem = auth.password_problem(password)
+    if problem:
+        return JSONResponse({"error": problem}, status_code=400)
+    if store.get_user_by_email(email):
+        return JSONResponse({"error": "Account exists — sign in instead.", "exists": True}, status_code=409)
+    uid = store.create_user(email, auth.hash_password(password))
+    if uid is None:  # lost a race between the check and the insert
+        return JSONResponse({"error": "Account exists — sign in instead.", "exists": True}, status_code=409)
+    return _login_response(uid, email)
+
+
+@app.post("/api/auth/login")
+async def auth_login(request: Request) -> JSONResponse:
+    body = await request.json()
+    email = (body.get("email") or "").strip()
+    password = body.get("password") or ""
+    user = store.get_user_by_email(email)
+    if not user or not auth.verify_password(password, user["password_hash"]):
+        return JSONResponse({"error": "Invalid email or password."}, status_code=401)
+    return _login_response(user["id"], user["email"])
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request) -> JSONResponse:
+    token = request.cookies.get(auth.COOKIE_NAME)
+    if token:
+        store.delete_session(token)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(auth.COOKIE_NAME, path="/")
+    return resp
+
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request) -> JSONResponse:
+    u = getattr(request.state, "user", None)
+    if not u:
+        return JSONResponse({"auth": False}, status_code=401)
+    return JSONResponse({
+        "auth": True, "email": u["email"],
+        "recent_recipients": store.get_recent_recipients(u["id"]),
+        "email_configured": emailer.is_configured(),
+        "has_resume": store.get_user_resume(u["id"]) is not None,
+    })
+
+
+# --------------------------------------------------------------------------- #
 # App shell
 # --------------------------------------------------------------------------- #
 @app.get("/")
-async def index() -> FileResponse:
+async def index(request: Request):
+    if not getattr(request.state, "user", None):
+        return RedirectResponse("/landing", status_code=302)
+    return FileResponse(STATIC / "index.html")
+
+
+@app.get("/app")
+async def app_shell() -> FileResponse:
+    """Public SPA entry (matches the Vercel /app rewrite). The SPA itself checks
+    auth via /api/auth/me and redirects to /landing when anonymous."""
     return FileResponse(STATIC / "index.html")
 
 
 @app.get("/landing")
 async def landing() -> FileResponse:
-    """Public marketing/submission page (hero, problem, agents, demo video)."""
+    """Public marketing/submission + sign-in page."""
     return FileResponse(STATIC / "landing.html")
 
 
@@ -123,10 +247,11 @@ async def landing() -> FileResponse:
 # Platform API
 # --------------------------------------------------------------------------- #
 @app.get("/api/dashboard")
-async def api_dashboard() -> JSONResponse:
+async def api_dashboard(request: Request) -> JSONResponse:
+    uid = _uid(request)
     return JSONResponse({
-        "cards": store.dashboard_stats(),
-        "activity": store.recent_activity(),
+        "cards": store.dashboard_stats(user_id=uid),
+        "activity": store.recent_activity(user_id=uid),
         "services": health.service_status(),
     })
 
@@ -134,7 +259,8 @@ async def api_dashboard() -> JSONResponse:
 # --------------------------------------------------------------------------- #
 # Incident war-room (live SSE) — now persists the finished run
 # --------------------------------------------------------------------------- #
-def _persist_incident(transcript: list[dict], verdict: dict, source: str) -> int:
+def _persist_incident(transcript: list[dict], verdict: dict, source: str,
+                      user_id: int | None = None) -> int:
     """Pull the service/region/severity off the opening signal and store the run."""
     service = region = severity = None
     postmortem = None
@@ -149,6 +275,7 @@ def _persist_incident(transcript: list[dict], verdict: dict, source: str) -> int
         service=service or "checkout-api", region=region or "us-east-1",
         severity=severity or "SEV1", source=source,
         incident_id=(postmortem or {}).get("incident_id"), postmortem=postmortem,
+        user_id=user_id,
     )
 
 
@@ -180,14 +307,32 @@ async def resolve_start(request: Request) -> JSONResponse:
         except ingest.IngestError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         note = f"Parsed {len(telemetry)} telemetry points from {body.get('filename', 'upload')}."
+        
+        # Calculate a stable hash of the telemetry content + filename
+        import hashlib
+        h_seed = int(hashlib.md5((body.get("filename", "") + raw).encode("utf-8")).hexdigest(), 16)
+        
+        # Dynamic cost and incident metrics per uploaded file
+        scenario.revenue_per_min_usd = float(500 + (h_seed % 2001))
+        scenario.human_baseline_mttr_s = float((30 + (h_seed % 36)) * 60)
+        scenario.incident_id = f"INC-{2000 + (h_seed % 8000)}"
+        
+        # Extract deploy version if present in the telemetry data
+        deploy_version = next((p["deploy"] for p in telemetry if p.get("deploy")), None)
+        if deploy_version:
+            scenario.deploy = deploy_version
+            
     elif mode == "describe":
         note = f"Generated telemetry for {scenario.service}/{scenario.region}."
 
+    user = request.state.user
     run_id = uuid4().hex
     _SESSIONS[run_id] = {
         "telemetry": telemetry, "scenario": scenario,
         "source": "demo" if mode == "demo" else "upload",
         "event": None, "approved": False,
+        "user_id": user["id"] if user else None,
+        "user_email": user["email"] if user else None,
     }
     return JSONResponse({"run_id": run_id, "note": note,
                          "points": len(telemetry) if telemetry else 0})
@@ -250,19 +395,19 @@ async def resolve_stream(request: Request) -> StreamingResponse:
                 await queue.put(("verdict", {"resolved": False, "no_incident": True}))
                 return
             run_db_id = None
-            email_status = {"status": "skipped", "detail": "Email sent only on resolution."}
             if verdict.get("resolved") or verdict.get("rejected_by"):
-                run_db_id = _persist_incident(transcript, verdict, source=sess["source"])
-            if verdict.get("resolved"):
-                try:
-                    run = store.get_incident_run(run_db_id)
-                    email_status = emailer.send_incident_report(run, to=store.email_recipients())
-                except emailer.EmailNotConfigured as e:
-                    email_status = {"status": "not_configured", "detail": str(e)}
-                except emailer.EmailError as e:
-                    email_status = {"status": "error", "detail": str(e)}
+                run_db_id = _persist_incident(transcript, verdict, source=sess["source"],
+                                              user_id=sess.get("user_id"))
             await queue.put(("verdict", {**verdict, "run_db_id": run_db_id}))
-            await queue.put(("email", email_status))
+            # No silent sends: on resolution we PROMPT the UI for a recipient
+            # (prefilled with the signed-in user's email) and a confirm click.
+            if verdict.get("resolved") and run_db_id:
+                await queue.put(("email", {
+                    "status": "prompt", "run_db_id": run_db_id,
+                    "default": sess.get("user_email"),
+                    "recent": store.get_recent_recipients(sess["user_id"]) if sess.get("user_id") else [],
+                    "configured": emailer.is_configured(),
+                }))
         except Exception as exc:
             await queue.put(("error", {"detail": str(exc)}))
         finally:
@@ -287,6 +432,30 @@ async def resolve_stream(request: Request) -> StreamingResponse:
         events(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.post("/api/resolve/email")
+async def resolve_email(request: Request) -> JSONResponse:
+    """Send the incident report to a user-confirmed recipient list (no silent send).
+    Envelope From stays EMAIL_FROM; Reply-To + a 'sent by' line carry the user."""
+    u = request.state.user
+    body = await request.json()
+    recipients = [r.strip() for r in (body.get("recipients") or []) if r and r.strip()]
+    if not recipients:
+        return JSONResponse({"error": "Enter at least one recipient."}, status_code=400)
+    run = store.get_incident_run(int(body.get("run_db_id") or 0), user_id=u["id"])
+    if not run:
+        return JSONResponse({"error": "Incident run not found."}, status_code=404)
+    try:
+        res = emailer.send_incident_report(run, to=recipients, sent_by=u["email"])
+        store.remember_recipients(u["id"], recipients)
+        return JSONResponse({"status": "sent", **res})
+    except emailer.EmailNotConfigured as e:
+        return JSONResponse({"status": "not_configured", "detail": str(e)})
+    except emailer.EmailRecipientNotAllowed as e:
+        return JSONResponse({"status": "recipient_not_allowed", "detail": str(e)})
+    except emailer.EmailError as e:
+        return JSONResponse({"status": "error", "detail": str(e)})
 
 
 @app.get("/stream")
@@ -339,6 +508,149 @@ async def stream(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Simulate incident — PUBLIC trigger. Genuine reactive coordination through Band
+# when keys are present (reuses band_live's handlers), deterministic OFFLINE run
+# otherwise. Either way the war-room transcript streams over SSE; the human gate
+# is a dashboard Approve button with auto-approve fallback so it never hangs.
+# --------------------------------------------------------------------------- #
+_SIM: dict[str, dict] = {}
+
+
+def _band_live_ready() -> bool:
+    """All BAND_* set (incl. @security)? Checked WITHOUT importing the band SDK."""
+    try:
+        from band_live import protocol as blp
+        return not blp.missing_env()
+    except Exception:
+        return False
+
+
+@app.post("/api/simulate/start")
+async def simulate_start(request: Request) -> JSONResponse:
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    want = (body.get("mode") or "auto").lower()
+    genuine = want == "genuine" or (want == "auto" and _band_live_ready())
+    if want == "offline":
+        genuine = False
+    run_id = uuid4().hex
+    _SIM[run_id] = {"mode": "genuine" if genuine else "offline",
+                    "event": asyncio.Event(), "approved": True}
+    return JSONResponse({"run_id": run_id, "mode": _SIM[run_id]["mode"],
+                         "band_ready": _band_live_ready()})
+
+
+@app.post("/api/simulate/decision")
+async def simulate_decision(request: Request) -> JSONResponse:
+    body = await request.json()
+    sess = _SIM.get(body.get("run_id", ""))
+    if not sess:
+        return JSONResponse({"error": "unknown run"}, status_code=404)
+    sess["approved"] = bool(body.get("approve", True))
+    sess["event"].set()
+    return JSONResponse({"ok": True, "approved": sess["approved"]})
+
+
+@app.get("/api/simulate/stream")
+async def simulate_stream(request: Request) -> StreamingResponse:
+    run_id = request.query_params.get("run_id", "")
+    sess = _SIM.get(run_id)
+    queue: asyncio.Queue = asyncio.Queue()
+    if not sess:
+        async def gone():
+            yield _sse("error", {"detail": "Start a run first."})
+            yield _sse("done", {})
+        return StreamingResponse(gone(), media_type="text/event-stream")
+
+    pace = float(request.query_params.get("pace", "0.5"))
+
+    async def emit(event: str, data) -> None:
+        await queue.put((event, data))
+
+    async def decide():
+        # Dashboard Approve button (or auto-approve after the gate).
+        if sess["event"].is_set():
+            return "approve" if sess["approved"] else "reject"
+        return None
+
+    async def run_offline() -> None:
+        bus = LocalBus()
+        transcript: list[dict] = []
+
+        async def relay(msg) -> None:
+            d = msg.model_dump(mode="json")
+            transcript.append(d)
+            await emit("message", d)
+
+        bus.subscribe(relay)
+
+        async def approve_cb() -> bool:
+            await emit("await_approval", {})
+            try:
+                await asyncio.wait_for(sess["event"].wait(), timeout=12.0)
+                return sess["approved"]
+            except asyncio.TimeoutError:
+                return True   # auto-approve fallback — never hang
+
+        _, verdict = await run_incident(bus, approve=approve_cb)
+        try:
+            _persist_incident(transcript, verdict, source="demo")
+        except Exception:
+            pass
+        if verdict:
+            await emit("verdict", verdict)
+
+    async def drive() -> None:
+        try:
+            if sess["mode"] == "genuine":
+                try:
+                    from band_live.runner import run_live
+                    await emit("notice", {"mode": "genuine",
+                              "detail": "Genuine reactive coordination running through Band."})
+                    await run_live(emit, decide, timeout_s=120.0, auto_after_s=10.0)
+                    return
+                except Exception as exc:
+                    # Any Band hiccup → seamless offline fallback, never an error.
+                    sess["mode"] = "offline"
+                    await emit("notice", {"mode": "offline",
+                              "detail": "Showing the deterministic cascade (Band unavailable)."})
+            await run_offline()
+        except Exception as exc:
+            await emit("notice", {"mode": "offline", "detail": "Deterministic cascade."})
+            try:
+                await run_offline()
+            except Exception:
+                pass
+        finally:
+            await queue.put(("done", None))
+
+    async def events():
+        task = asyncio.create_task(drive())
+        try:
+            while True:
+                kind, data = await queue.get()
+                if kind == "done":
+                    yield _sse("done", {})
+                    break
+                yield _sse(kind, data)
+                # Pace only offline chatter so it reads "live"; genuine is already
+                # paced by Band round-trips.
+                if (kind == "message" and sess["mode"] == "offline" and pace > 0
+                        and not await request.is_disconnected()):
+                    await asyncio.sleep(pace)
+        finally:
+            task.cancel()
+            _SIM.pop(run_id, None)
+
+    return StreamingResponse(
+        events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # --------------------------------------------------------------------------- #
@@ -439,19 +751,20 @@ async def api_settings_set(request: Request) -> JSONResponse:
 
 
 @app.get("/api/analytics")
-async def api_analytics() -> JSONResponse:
-    return JSONResponse(store.analytics())
+async def api_analytics(request: Request) -> JSONResponse:
+    return JSONResponse(store.analytics(user_id=_uid(request)))
 
 
 # --------------------------------------------------------------------------- #
 # Phase 4 — History + downloadable reports
 # --------------------------------------------------------------------------- #
 @app.get("/api/history")
-async def api_history(type: str = "all") -> JSONResponse:
-    """Unified, newest-first list of past runs, optionally filtered by type."""
+async def api_history(request: Request, type: str = "all") -> JSONResponse:
+    """Unified, newest-first list of THIS user's past runs, optionally filtered."""
+    uid = _uid(request)
     items: list[dict] = []
     if type in ("all", "incident"):
-        for r in store.list_incident_runs(200):
+        for r in store.list_incident_runs(200, user_id=uid):
             v = r.get("verdict") or {}
             items.append({
                 "kind": "incident", "id": r["id"], "created_at": r["created_at"],
@@ -462,7 +775,7 @@ async def api_history(type: str = "all") -> JSONResponse:
                 "metric": f"${(r.get('averted_cost_usd') or 0):,.0f} averted",
             })
     if type in ("all", "job"):
-        for r in store.list_job_runs(200):
+        for r in store.list_job_runs(200, user_id=uid):
             items.append({
                 "kind": "job", "id": r["id"], "created_at": r["created_at"],
                 "title": f"{r.get('query') or r.get('entry_mode')}",
@@ -475,16 +788,20 @@ async def api_history(type: str = "all") -> JSONResponse:
 
 
 @app.get("/api/history/{kind}/{run_id}")
-async def api_history_detail(kind: str, run_id: int) -> JSONResponse:
-    run = store.get_incident_run(run_id) if kind == "incident" else store.get_job_run(run_id)
+async def api_history_detail(request: Request, kind: str, run_id: int) -> JSONResponse:
+    uid = _uid(request)
+    run = (store.get_incident_run(run_id, user_id=uid) if kind == "incident"
+           else store.get_job_run(run_id, user_id=uid))
     if not run:
         return JSONResponse({"error": "not found"}, status_code=404)
     return JSONResponse({"kind": kind, "run": run})
 
 
 @app.get("/api/report/{kind}/{run_id}")
-async def api_report(kind: str, run_id: int, fmt: str = "md"):
-    run = store.get_incident_run(run_id) if kind == "incident" else store.get_job_run(run_id)
+async def api_report(request: Request, kind: str, run_id: int, fmt: str = "md"):
+    uid = _uid(request)
+    run = (store.get_incident_run(run_id, user_id=uid) if kind == "incident"
+           else store.get_job_run(run_id, user_id=uid))
     if not run:
         return JSONResponse({"error": "not found"}, status_code=404)
     try:
@@ -538,11 +855,16 @@ async def jobs_start(request: Request) -> JSONResponse:
     if entry_mode != "resume" and not query:
         return JSONResponse({"error": "A company name or field is required."}, status_code=400)
 
+    user = request.state.user
+    # Remember the parsed resume so "Rebuild resume for a company" can reuse it.
+    if resume_profile and user:
+        store.set_user_resume(user["id"], resume_profile)
     run_id = uuid4().hex
     _JOB_SESSIONS[run_id] = {
         "entry_mode": entry_mode, "query": query, "location": location,
         "resume": resume_profile, "provider": provider,
         "event": None, "choice": None,
+        "user_id": user["id"] if user else None,
     }
     preview = None
     if resume_profile:
@@ -610,6 +932,7 @@ async def jobs_stream(request: Request) -> StreamingResponse:
                 profile=result["profile"], matches=result["matches"],
                 applications=result["applications"], transcript=transcript,
                 verdict=result.get("decision"), tailored_count=result["tailored_count"],
+                user_id=sess.get("user_id"),
             )
             # Push a job alert to notify-capable channels (Telegram/Discord).
             top = (result["matches"] or [{}])[0]
@@ -645,6 +968,86 @@ async def jobs_stream(request: Request) -> StreamingResponse:
         events(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _resume_profile_for(uid: int, body: dict):
+    """Resolve the resume profile from an upload, else the user's stored parse.
+    Returns (profile, error_response). Read-only: stores only the parsed ORIGINAL."""
+    b64 = body.get("resume_b64")
+    if b64:
+        try:
+            raw = base64.b64decode(b64.split(",")[-1])
+            from backend.llm import make_llm
+            profile = resume_parser.parse_profile(raw, body.get("resume_name", "resume.pdf"),
+                                                  make_llm("aiml"))
+            store.set_user_resume(uid, profile)   # the parsed original, never a modified one
+            return profile, None
+        except resume_parser.ResumeError as e:
+            return None, JSONResponse({"error": str(e)}, status_code=400)
+    profile = store.get_user_resume(uid)
+    if not profile:
+        return None, JSONResponse(
+            {"error": "No resume on file — upload one or run a resume job search first."},
+            status_code=400)
+    return profile, None
+
+
+@app.post("/api/jobs/analyze")
+async def jobs_analyze(request: Request) -> JSONResponse:
+    """
+    READ-ONLY resume fit analysis for a selected job. Reads the parsed resume + the
+    job and returns structured improvement SUGGESTIONS — it NEVER rewrites, stores,
+    or emails a modified resume, and never fabricates. Uses the LLM when a key is
+    set (system prompt enforces the rules), else a deterministic rule-based fallback.
+    """
+    u = request.state.user
+    body = await request.json()
+    company = (body.get("company") or "").strip()
+    title = (body.get("title") or body.get("role") or "").strip()
+    job_desc = (body.get("job_description") or body.get("description") or "").strip()
+    if not (company or title):
+        return JSONResponse({"error": "Select a job (company/title) to analyze against."},
+                            status_code=400)
+
+    profile, err = _resume_profile_for(u["id"], body)
+    if err:
+        return err
+
+    from backend.llm import make_llm
+    from jobs.analyze import analyze_fit
+    job = {"title": title or f"Role at {company}", "company": company, "description": job_desc}
+    # make_llm returns OfflineLLM when no key is set; analyze_fit then uses the
+    # rule-based fallback (OfflineLLM yields no JSON), so it always returns suggestions.
+    llm = make_llm("aiml")
+    from backend.llm import OfflineLLM
+    analysis = analyze_fit(profile, job, None if isinstance(llm, OfflineLLM) else llm)
+    return JSONResponse({"ok": True, "job": job, "analysis": analysis,
+                         "resume_unchanged": True})
+
+
+@app.post("/api/jobs/analyze/email")
+async def jobs_analyze_email(request: Request) -> JSONResponse:
+    """Optionally email the SUGGESTIONS summary (no attachment, no resume file) to a
+    confirmed recipient. From stays EMAIL_FROM; Reply-To = the user."""
+    u = request.state.user
+    body = await request.json()
+    job = body.get("job") or {}
+    analysis = body.get("analysis") or {}
+    recipient = (body.get("recipient") or "").strip() or u["email"]
+    if not analysis:
+        return JSONResponse({"error": "Nothing to email — run the analysis first."}, status_code=400)
+    from jobs.analyze import summary_text
+    subject, text, html = summary_text(job, analysis)
+    try:
+        res = emailer.send_email(subject, text, html, to=[recipient], sent_by=u["email"])
+        store.remember_recipients(u["id"], [recipient])
+        return JSONResponse({"status": "sent", **res})
+    except emailer.EmailNotConfigured as e:
+        return JSONResponse({"status": "not_configured", "detail": str(e)})
+    except emailer.EmailRecipientNotAllowed as e:
+        return JSONResponse({"status": "recipient_not_allowed", "detail": str(e)})
+    except emailer.EmailError as e:
+        return JSONResponse({"status": "error", "detail": str(e)})
 
 
 def main() -> None:
