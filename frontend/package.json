@@ -1,0 +1,8 @@
+{
+  "name": "aegis-frontend",
+  "version": "1.0.0",
+  "description": "Aegis platform dev server proxy",
+  "scripts": {
+    "dev": "cd .. && .venv/bin/python -m frontend.server"
+  }
+}
