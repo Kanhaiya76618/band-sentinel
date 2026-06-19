@@ -182,9 +182,8 @@ band-sentinel/
 
 ## 🔗 Demo
 
-- 🎥 **Demo video:** _add your link_
-- 🌐 **Live demo:** _add your link_
-
+- 🎥 **Demo video:** https://band-sentinel-production.up.railway.app/landing
+- 🌐 **Live demo:**  https://www.youtube.com/watch?v=GYaF1BFyG0A
 ---
 
 ## 📜 License
